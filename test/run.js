@@ -23,7 +23,7 @@ test('empty file pairs first draft line, rest is an insert block', () => {
   const ops = core.align([''], ghost);
   assert.deepStrictEqual(ops[0], { t: 'pair', u: 0, g: 0 });
   assert.deepStrictEqual(ops[1], { t: 'ins', from: 1, to: 5, at: 0 });
-  assert.deepStrictEqual(core.lineDiff('', ghost[0]), { kind: 'suffix', text: ghost[0] });
+  assert.deepStrictEqual(core.lineDiff('', ghost[0]), { kind: 'suffix', text: ghost[0], at: 0 });
 });
 
 test('typed prefix shows remaining suffix', () => {
@@ -31,7 +31,7 @@ test('typed prefix shows remaining suffix', () => {
   const ops = core.align(user, ghost);
   const pair = ops.find((o) => o.t === 'pair');
   assert.deepStrictEqual(pair, { t: 'pair', u: 1, g: 1 });
-  assert.deepStrictEqual(core.lineDiff(user[1], ghost[1]), { kind: 'suffix', text: 'urn a + b;' });
+  assert.deepStrictEqual(core.lineDiff(user[1], ghost[1]), { kind: 'suffix', text: 'urn a + b;', at: 5 });
 });
 
 test('fresh blank line pairs with next draft line, not a later blank', () => {
@@ -80,6 +80,20 @@ test('pure insert block: lens sits on the line where the block goes', () => {
   assert.deepStrictEqual(hs, [{ lens: 1, start: 0, end: 0, gFrom: 1, gTo: 3 }]);
 });
 
+test('auto-closed quote/bracket is a gap to fill, not a typo', () => {
+  const draft = '        : "Trwa podmiana kontenerów"';
+  // VS Code put the closing quote in for you
+  assert.deepStrictEqual(core.lineDiff('        : "Trwa podmiana konteneró"', draft), { kind: 'suffix', text: 'w', at: 34 });
+  assert.deepStrictEqual(core.lineDiff('foo()', 'foo(a, b)'), { kind: 'suffix', text: 'a, b', at: 4 });
+  // a real typo stays a typo
+  assert.strictEqual(core.lineDiff('        : "Trwa podmiana kontenero"', draft).kind, 'mismatch');
+  // ghost at the gap keeps the closing quote after it
+  const u = ['x', '        : "Trwa podmiana konteneró"'];
+  assert.strictEqual(core.ghostAt(u, ['x', draft], 1, 34), 'w"');
+  assert.strictEqual(core.ghostAt(u, ['x', draft], 1, 20), null, 'cursor not at the gap');
+  assert.deepStrictEqual(core.tabFill(['// abc def'], ['// abc def ghi'], 0, 10, 'typescript'), { line: 0, from: 10, to: 10, text: ' ghi' });
+});
+
 test('ghostAt: rest of line + block below, typed over as you go', () => {
   // empty file: whole draft is ghost text at the cursor
   assert.strictEqual(core.ghostAt([''], ghost, 0, 0), ghost.join('\n'));
@@ -98,20 +112,59 @@ test('ghostAt: rest of line + block below, typed over as you go', () => {
 test('commentLines: /** */ blocks, //, # (not where # is code)', () => {
   const ts = ['/**', ' * Goes up.', ' */', 'const x = 1; // trailing', '// whole line', '/* one */', '/* a */ code()', '  * 2', '#x'];
   assert.deepStrictEqual([...core.commentLines(ts, 'typescript')].sort(), [0, 1, 2, 4, 5, 8]);
-  assert.deepStrictEqual([...core.commentLines(['# note', 'x = 1  # inline', '"""doc"""'], 'python')], [0]);
+  assert.deepStrictEqual([...core.commentLines(['# note', 'x = 1  # inline', '"""doc"""'], 'python')], [0, 2]);
   assert.deepStrictEqual([...core.commentLines(['#header {', '/* c */'], 'css')], [1]);
 });
 
-test('ghostLineAt: one line for Tab, never more', () => {
+test('commentLines: Python """/\'\'\' docstrings count, Java text blocks don\'t', () => {
+  const py = [
+    'def status(mongo):', // 0
+    '    """Return the active deploy status.', // 1
+    '', // 2
+    '    None when nothing runs.', // 3
+    '    """', // 4
+    '    x = """not a docstring"""', // 5
+    "    r'''raw one-liner'''", // 6
+    '    """one""" + extra', // 7 code after the closing quotes
+    '    return None', // 8
+  ];
+  assert.deepStrictEqual([...core.commentLines(py, 'python')].sort((a, b) => a - b), [1, 2, 3, 4, 6]);
+  const java = ['String q = """', '    SELECT 1', '    """;'];
+  assert.deepStrictEqual([...core.commentLines(java, 'java')], []);
+});
+
+test('tabFill: one comment line per Tab, never code', () => {
   const g = ['def f():', '    # explain', '    return 1'];
-  // end of "def f():" with new lines due: newline + the comment line only
-  assert.deepStrictEqual(core.ghostLineAt(['def f():'], g, 0, 8), { text: '\n    # explain', g: 1 });
-  // already on the empty line where it goes: the whole line
-  assert.deepStrictEqual(core.ghostLineAt(['def f():', ''], g, 1, 0), { text: '    # explain', g: 1 });
+  // end of "def f():" with a comment due below: newline + that line only
+  assert.deepStrictEqual(core.tabFill(['def f():'], g, 0, 8, 'python'), { line: 0, from: 8, to: 8, text: '\n    # explain' });
+  // empty / indented line where it goes: whole line, cursor anywhere in the indentation
+  assert.deepStrictEqual(core.tabFill(['def f():', ''], g, 1, 0, 'python'), { line: 1, from: 0, to: 0, text: '    # explain' });
+  assert.deepStrictEqual(core.tabFill(['def f():', '    '], g, 1, 2, 'python'), { line: 1, from: 0, to: 4, text: '    # explain' });
   // half-typed comment: the rest of it
-  assert.deepStrictEqual(core.ghostLineAt(['def f():', '    # exp'], g, 1, 9), { text: 'lain', g: 1 });
-  // blank draft lines before it come along
-  assert.deepStrictEqual(core.ghostLineAt(['a'], ['a', '', '// c'], 0, 1), { text: '\n\n// c', g: 2 });
+  assert.deepStrictEqual(core.tabFill(['def f():', '    # exp'], g, 1, 9, 'python'), { line: 1, from: 9, to: 9, text: 'lain' });
+  // Claude edited an existing comment (your old line differs): swap in the draft's line
+  const gd = ['x', '    uprawnienia `developer`. `deploy_status` też', '    """'];
+  const ud = ['x', '    uprawnienia `developer`."""'];
+  // (inside a docstring in the draft; your line ends one)
+  const gdoc = ['def f():', '    """Pulse.', ...gd.slice(1)];
+  const udoc = ['def f():', '    """Pulse.', ud[1]];
+  assert.deepStrictEqual(core.tabFill(udoc, gdoc, 2, udoc[2].length, 'python'), { line: 2, from: 0, to: udoc[2].length, text: gdoc[2] });
+  // code line: never
+  assert.strictEqual(core.tabFill(['def f():', '    # explain', '    ret'], g, 2, 7, 'python'), null);
+  // the file's final empty line got paired with the comment: Tab at the end of the line above
+  // still puts it in under the cursor (and the chain continues)
+  const jd = ['const a = 1;', '/**', ' * Status.', ' */', 'export const b = 2;', ''];
+  let ju = ['const a = 1;', ''];
+  for (let i = 0; i < 3; i++) {
+    const line = i;
+    const f = core.tabFill(ju, jd, line, ju[line].length, 'typescript');
+    assert.ok(f, `Tab ${i + 1} filled`);
+    ju = core.splitLines(ju.join('\n').split('\n').map((l, k) => (k === f.line ? l.slice(0, f.from) + f.text + l.slice(f.to) : l)).join('\n'));
+  }
+  assert.deepStrictEqual(ju, ['const a = 1;', '/**', ' * Status.', ' */', '']);
+  assert.strictEqual(core.tabFill(ju, jd, 3, 3, 'typescript'), null, 'code next: no fill');
+  // blank draft lines before the comment come along
+  assert.deepStrictEqual(core.tabFill(['a'], ['a', '', '// c'], 0, 1, 'typescript'), { line: 0, from: 1, to: 1, text: '\n\n// c' });
 });
 
 // ---- full turn through the hook CLI ----

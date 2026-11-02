@@ -83,6 +83,20 @@ exports.run = async () => {
     assert.strictEqual(items[0].insertText, ' = 2;\nconst w = 4;');
   });
 
+  await test('auto-closed quote: ghost fills the gap and keeps the quote after it', async () => {
+    const qfile = path.join(ws, 'quote.ts');
+    fs.writeFileSync(qfile, 'const s = "hello";\n'); // you typed `"hello`, VS Code added the closing `"`
+    fs.writeFileSync(core.ghostFile(ws, 'quote.ts'), 'const s = "hello world";\n');
+    const doc = await vscode.workspace.openTextDocument(qfile);
+    await vscode.window.showTextDocument(doc);
+    const at = new vscode.Position(0, 16); // right before the closing quote
+    const [item] = api.inlineGhost.provideInlineCompletionItems(doc, at);
+    assert.strictEqual(item.insertText, ' world";');
+    assert.ok(item.range.start.isEqual(at) && item.range.end.isEqual(doc.lineAt(0).range.end), 'replaces up to the line end');
+    assert.strictEqual(api.inlineGhost.provideInlineCompletionItems(doc, new vscode.Position(0, 5)), undefined, 'not mid-word');
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  });
+
   await test('unfinished file gets a 👻 badge; fully typed file loses it', async () => {
     const uri = vscode.Uri.file(file);
     const d = api.fileBadges.provideFileDecoration(uri);
@@ -154,6 +168,52 @@ exports.run = async () => {
     await vscode.commands.executeCommand('vibeGhost.noAccept');
     await sleep(300);
     assert.doesNotMatch(doc.lineAt(2).text, /const/, 'code is never filled in');
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  });
+
+  await test('Tab fills a Python docstring line', async () => {
+    const pfile = path.join(ws, 'status.py');
+    const doc1 = '    """Return the active deploy status, or None when nothing is running."""';
+    fs.writeFileSync(pfile, 'def status():\n');
+    fs.writeFileSync(core.ghostFile(ws, 'status.py'), `def status():\n${doc1}\n    return None\n`);
+    const doc = await vscode.workspace.openTextDocument(pfile);
+    const editor = await vscode.window.showTextDocument(doc);
+    assert.strictEqual(doc.languageId, 'python');
+    const at = new vscode.Position(1, 0);
+    editor.selection = new vscode.Selection(at, at);
+    await vscode.commands.executeCommand('vibeGhost.noAccept');
+    await sleep(300);
+    assert.strictEqual(doc.lineAt(1).text, doc1);
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  });
+
+  await test('Tab, Tab, Tab fills a whole JSDoc block (cursor follows), then stops at code', async () => {
+    const jfile = path.join(ws, 'jsdoc.ts');
+    const block = ['/**', ' * Status of the running deploy, from the pulse.', ' */'];
+    fs.writeFileSync(jfile, 'const a = 1;\n');
+    fs.writeFileSync(core.ghostFile(ws, 'jsdoc.ts'), ['const a = 1;', ...block, 'export const b = 2;', ''].join('\n'));
+    const doc = await vscode.workspace.openTextDocument(jfile);
+    const editor = await vscode.window.showTextDocument(doc);
+    // cursor at the end of the line above the block, like after clicking there
+    const start = doc.lineAt(0).range.end;
+    editor.selection = new vscode.Selection(start, start);
+    for (let i = 0; i < 3; i++) await vscode.commands.executeCommand('vibeGhost.noAccept');
+    assert.deepStrictEqual([1, 2, 3].map((l) => doc.lineAt(l).text), block);
+    await vscode.commands.executeCommand('vibeGhost.noAccept'); // code next: just an indent
+    assert.doesNotMatch(doc.getText(), /export const b/);
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  });
+
+  await test('Tab swaps a comment line Claude edited for the draft\'s version', async () => {
+    const efile = path.join(ws, 'edited.ts');
+    fs.writeFileSync(efile, '/**\n * Old wording.\n */\nconst c = 3;\n');
+    fs.writeFileSync(core.ghostFile(ws, 'edited.ts'), '/**\n * New wording, with the deploy status.\n */\nconst c = 3;\n');
+    const doc = await vscode.workspace.openTextDocument(efile);
+    const editor = await vscode.window.showTextDocument(doc);
+    const end = doc.lineAt(1).range.end;
+    editor.selection = new vscode.Selection(end, end);
+    await vscode.commands.executeCommand('vibeGhost.noAccept');
+    assert.strictEqual(doc.lineAt(1).text, ' * New wording, with the deploy status.');
     await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
   });
 

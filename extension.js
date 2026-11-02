@@ -15,6 +15,7 @@ let deco;
 let statusItem;
 let comments;
 let ctx; // ExtensionContext
+let log = { info() {} }; // "Vibecodus Maximus" output channel (View > Output) once activated
 let bin; // this extension's ghost.js, what the Claude hooks call
 const lensChanged = new vscode.EventEmitter();
 const cache = new Map(); // ghost file path -> { mtimeMs, lines, text }
@@ -147,7 +148,7 @@ function render(editor) {
   const out = { suffix: [], insert: [], mismatch: [], extra: [] };
   const lang = doc.languageId;
   // The cursor line gets real (multi-line) ghost text from the inline provider instead.
-  const skipLine = cursorGhost(editor, user, g, ops) ? editor.selection.active.line : -1;
+  const skipLine = inlineShowing && cursorGhost(editor, user, g, ops) ? editor.selection.active.line : -1;
 
   for (const op of ops) {
     if ((op.t === 'pair' && op.u === skipLine) || (op.t === 'ins' && op.at === skipLine)) continue;
@@ -156,7 +157,7 @@ function render(editor) {
       const want = g.lines[op.g];
       const d = core.lineDiff(u, want);
       if (d.kind === 'suffix') {
-        const end = new vscode.Position(op.u, u.length);
+        const end = new vscode.Position(op.u, d.at); // the gap before an auto-closed quote/bracket, or the end
         out.suffix.push({
           range: new vscode.Range(end, end),
           renderOptions: { after: { contentText: show(d.text, tabSize) } },
@@ -228,7 +229,7 @@ const inlineGhost = {
     const user = core.splitLines(doc.getText());
     const text = core.ghostAt(user, g.lines, position.line, position.character);
     if (!text) return;
-    const item = new vscode.InlineCompletionItem(text, new vscode.Range(position, position));
+    const item = new vscode.InlineCompletionItem(text, new vscode.Range(position, doc.lineAt(position.line).range.end));
     // Accepting is cheating: if it ever happens (toolbar click etc.), undo it.
     item.command = { title: 'No', command: 'vibeGhost.rejectAccept' };
     return [item];
@@ -404,12 +405,14 @@ function announceDecorations() {
 }
 
 const stats = { rejected: 0 };
-let triggerTimer;
+// The inline ghost shows when VS Code triggers inline suggestions itself, i.e. while you type.
+// We never trigger them by command: a manual trigger also wakes Copilot and friends, which focus
+// mode keeps quiet. So: typing = inline ghost; just moving the cursor = decorations on that line.
+let inlineShowing = false;
+let lastEdit = 0;
 function onSelection(e) {
+  if (Date.now() - lastEdit > 150) inlineShowing = false; // moved, not typed: VS Code hid it
   scheduleRender();
-  if (e.textEditor !== vscode.window.activeTextEditor || !inlineOn() || !ghostFor(e.textEditor.document)) return;
-  clearTimeout(triggerTimer);
-  triggerTimer = setTimeout(() => vscode.commands.executeCommand('editor.action.inlineSuggest.trigger'), 120);
 }
 
 function updateContext() {
@@ -639,6 +642,11 @@ function refreshStatus() {
 // Paste guard: a big chunk that comes straight out of the draft gets undone.
 let ownEdit = false; // our own Tab-completed comment line
 function onChange(e) {
+  const active = vscode.window.activeTextEditor;
+  if (active && active.document === e.document) {
+    lastEdit = Date.now();
+    inlineShowing = true;
+  }
   scheduleRender();
   const cfg = vscode.workspace.getConfiguration('vibeGhost');
   if (ownEdit || !cfg.get('blockPaste', true) || e.reason !== undefined || !e.document.isDirty) return;
@@ -828,18 +836,26 @@ const commands = {
     const editor = vscode.window.activeTextEditor;
     const doc = editor && editor.document;
     const g = doc && ghostFor(doc);
+    const pos = editor && editor.selection.active;
     if (g && vscode.workspace.getConfiguration('vibeGhost').get('tabCompletesComments', true)) {
-      const pos = editor.selection.active;
-      const next = core.ghostLineAt(core.splitLines(doc.getText()), g.lines, pos.line, pos.character);
-      if (next && core.commentLines(g.lines, doc.languageId).has(next.g)) {
+      const f = core.tabFill(core.splitLines(doc.getText()), g.lines, pos.line, pos.character, doc.languageId);
+      if (f) {
         ownEdit = true; // not a paste: keep the paste guard out of it
         try {
-          await editor.edit((b) => b.insert(pos, next.text));
+          await editor.edit((b) => b.replace(new vscode.Range(f.line, f.from, f.line, f.to), f.text));
         } finally {
           ownEdit = false;
         }
+        // cursor to the end of what was filled, so the next Tab continues from there
+        const parts = f.text.split('\n');
+        const end = new vscode.Position(f.line + parts.length - 1, parts.length > 1 ? parts[parts.length - 1].length : f.from + f.text.length);
+        editor.selection = new vscode.Selection(end, end);
+        log.info(`Tab ${g.rel}:${pos.line + 1}:${pos.character + 1} [${doc.languageId}] filled comment line`);
         return;
       }
+      log.info(`Tab ${g.rel}:${pos.line + 1}:${pos.character + 1} [${doc.languageId}] nothing to fill here (no whole-line comment due at the cursor), indent`);
+    } else if (doc) {
+      log.info(`Tab ${vscode.workspace.asRelativePath(doc.uri)}: ${g ? 'tabCompletesComments is off' : 'no draft for this file'}, indent`);
     }
     return vscode.commands.executeCommand('tab');
   },
@@ -906,6 +922,9 @@ function activate(context) {
 
   ctx = context;
   bin = path.join(context.extensionPath, 'bin', 'ghost.js');
+  log = vscode.window.createOutputChannel('Vibecodus Maximus', { log: true });
+  context.subscriptions.push(log);
+  log.info(`activated ${context.extension.packageJSON.version}`);
   const addFolder = (folder) => {
     // **/ so sub-repos' .ghost folders are watched too
     const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, `**/${core.DIR}/**`));

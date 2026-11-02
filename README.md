@@ -10,7 +10,7 @@ When the file matches the draft, the draft disappears.
 ## Setup
 
 ```bash
-code --install-extension vibecodus-maximus-0.11.0.vsix
+code --install-extension vibecodus-maximus-0.14.0.vsix
 ```
 
 That's it. Ghost mode is **on by default**: open any git repo in VS Code and the extension wires it up,
@@ -77,7 +77,7 @@ turn how far you've got typing each draft.
 
 | | |
 |---|---|
-| ghost text at the cursor | the rest of the line **plus the new lines below it**, rendered in place like Copilot ghost text: just type over it. `Tab` indents and never accepts code (accepting any other way gets undone). **Exception:** when the line due is entirely a comment (`/** */` blocks, `//`, `#` where # is a comment) `Tab` fills in that one line. Off: `vibeGhost.tabCompletesComments`. Put the cursor at the end of the line above a `👻 +N ↓` marker (or hit `Ctrl+Alt+G`) to see a block |
+| ghost text at the cursor | the rest of the line **plus the new lines below it**, rendered in place like Copilot ghost text: just type over it. `Tab` indents and never accepts code (accepting any other way gets undone). **Exception:** when the line due is entirely a comment (`/** */` blocks, Python `"""`/`'''` docstrings, `//`, `#` where # is a comment) `Tab` fills in that one line. Off: `vibeGhost.tabCompletesComments`. Put the cursor at the end of the line above a `👻 +N ↓` marker (or hit `Ctrl+Alt+G`) to see a block |
 | ghost text after other lines | rest of the line to type |
 | 👻 badge + purple name (Explorer, tabs) | file still has draft lines to type; hover shows how many. ✍ = Claude is writing it right now. Disappears when you finished typing |
 | status bar `· autocomplete off` | you are in a draft file, so IntelliSense popups and AI inline suggestions are paused and the ghost is the only autocomplete (`Ctrl+Space` still works). Leave the file and your settings come back exactly as they were. Turn off with `vibeGhost.quietOtherCompletions` |
@@ -142,6 +142,11 @@ The same commands are in VS Code: `Ghost: Mark baseline` and `Ghost: Ghostify ch
 - While a mark is set, the pre-commit hook blocks commits so un-ghostified AI code can't sneak in.
   `ghost.js unmark` drops it.
 - Also works for Claude's Bash-made changes: `mark` before, `ghostify` after.
+
+## Troubleshooting
+
+`View > Output > Vibecodus Maximus` logs the extension version and every `Tab` decision
+(`filled comment line` / `nothing to fill here`), with file, line and column.
 
 ## Limits
 

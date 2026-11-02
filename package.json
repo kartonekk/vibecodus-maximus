@@ -2,7 +2,7 @@
   "name": "vibecodus-maximus",
   "displayName": "Vibecodus Maximus: Ghost Code",
   "description": "Claude Code writes drafts as ghost text behind your code. You type them. Only what you type gets committed.",
-  "version": "0.11.0",
+  "version": "0.14.0",
   "publisher": "karton",
   "license": "MIT",
   "icon": "patrick-star.png",
@@ -156,7 +156,7 @@
       {
         "command": "vibeGhost.noAccept",
         "key": "tab",
-        "when": "editorTextFocus && inlineSuggestionVisible && vibeGhost.draftOpen"
+        "when": "editorTextFocus && vibeGhost.draftOpen && !suggestWidgetVisible && !inSnippetMode && !editorTabMovesFocus && !editorHasSelection"
       },
       {
         "command": "cursorWordEndRight",
@@ -187,7 +187,7 @@
         "vibeGhost.tabCompletesComments": {
           "type": "boolean",
           "default": true,
-          "description": "Tab fills in the next draft line when that whole line is a comment (/** */ blocks, //, and # where # is a comment). Code lines always have to be typed."
+          "description": "Tab fills in the next draft line when that whole line is a comment (/** */ blocks, Python \"\"\" docstrings, //, and # where # is a comment). Code lines always have to be typed."
         },
         "vibeGhost.quietOtherCompletions": {
           "type": "boolean",
