@@ -49,13 +49,29 @@ function makeDecorations() {
   };
 }
 
-function rootFor(uri) {
+function wsFolder(uri) {
   const folder = vscode.workspace.getWorkspaceFolder(uri);
   return folder && folder.uri.fsPath;
 }
 
+// The repo a file belongs to (closest .ghost/.git), so sub-repos of an opened folder work.
+function rootFor(uri) {
+  return core.closestRoot(path.dirname(uri.fsPath)) || wsFolder(uri);
+}
+
+// Every repo / ghost root in the open folders, sub-repos included. Cached; the .ghost
+// watcher and folder changes reset it.
+let rootsCache = null;
 function roots() {
-  return (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath);
+  if (!rootsCache) {
+    const set = new Set();
+    for (const f of vscode.workspace.workspaceFolders || []) {
+      for (const r of core.nestedRoots(f.uri.fsPath)) set.add(r);
+      for (const r of setup.reposIn(f.uri.fsPath)) set.add(r);
+    }
+    rootsCache = [...set];
+  }
+  return rootsCache;
 }
 
 function readGhost(gp) {
@@ -77,7 +93,7 @@ function readGhost(gp) {
 // Draft info for a document, or null if it has none.
 function ghostFor(doc) {
   if (doc.uri.scheme !== 'file') return null;
-  const root = rootFor(doc.uri);
+  const root = core.ghostRootFor(doc.uri.fsPath);
   if (!root) return null;
   const rel = core.relOf(root, doc.uri.fsPath);
   if (!rel) return null;
@@ -105,18 +121,36 @@ function clear(editor) {
   for (const d of Object.values(deco)) editor.setDecorations(d, []);
 }
 
+const inlineOn = () =>
+  vscode.workspace.getConfiguration('vibeGhost').get('inlineGhost', true) &&
+  vscode.workspace.getConfiguration('editor').get('inlineSuggest.enabled', true);
+
+// Ghost text the inline provider shows at this editor's cursor, if any.
+function cursorGhost(editor, user, g, ops) {
+  if (!inlineOn() || editor !== vscode.window.activeTextEditor) return null;
+  const pos = editor.selection.active;
+  return core.ghostAt(user, g.lines, pos.line, pos.character, ops);
+}
+
 function render(editor) {
   const doc = editor.document;
   const g = ghostFor(doc);
-  if (!g || core.isActive(g.root) || isStale(doc)) return clear(editor);
+  if (!g || core.isActive(g.root)) return clear(editor);
+  if (isStale(doc)) {
+    warnStale(doc, g);
+    return clear(editor);
+  }
 
   const tabSize = Number(editor.options.tabSize) || 4;
   const user = core.splitLines(doc.getText());
   const ops = core.align(user, g.lines);
   const out = { suffix: [], insert: [], mismatch: [], extra: [] };
   const lang = doc.languageId;
+  // The cursor line gets real (multi-line) ghost text from the inline provider instead.
+  const skipLine = cursorGhost(editor, user, g, ops) ? editor.selection.active.line : -1;
 
   for (const op of ops) {
+    if ((op.t === 'pair' && op.u === skipLine) || (op.t === 'ins' && op.at === skipLine)) continue;
     if (op.t === 'pair') {
       const u = user[op.u];
       const want = g.lines[op.g];
@@ -167,6 +201,222 @@ function md(lang, lines, title) {
   return m;
 }
 
+// The editor still holds Claude's version while the disk has yours (e.g. a restore VS Code
+// didn't pick up). Typing there or saving would make Claude's code yours, so say so loudly.
+const staleWarned = new Set();
+async function warnStale(doc, g) {
+  if (staleWarned.has(g.gp)) return;
+  staleWarned.add(g.gp);
+  const pick = await vscode.window.showWarningMessage(
+    `👻 The editor shows Claude's version of ${g.rel}, not yours. Don't save it. Reload your version from disk?`,
+    'Reload'
+  );
+  staleWarned.delete(g.gp);
+  if (pick !== 'Reload' || doc.isDirty) return;
+  await vscode.window.showTextDocument(doc);
+  await vscode.commands.executeCommand('workbench.action.files.revert');
+}
+
+// ---- real ghost text at the cursor (type over it) ----
+
+const inlineGhost = {
+  provideInlineCompletionItems(doc, position) {
+    const editor = vscode.window.activeTextEditor;
+    if (!inlineOn() || !editor || editor.document !== doc) return;
+    const g = ghostFor(doc);
+    if (!g || core.isActive(g.root) || isStale(doc)) return;
+    const user = core.splitLines(doc.getText());
+    const text = core.ghostAt(user, g.lines, position.line, position.character);
+    if (!text) return;
+    const item = new vscode.InlineCompletionItem(text, new vscode.Range(position, position));
+    // Accepting is cheating: if it ever happens (toolbar click etc.), undo it.
+    item.command = { title: 'No', command: 'vibeGhost.rejectAccept' };
+    return [item];
+  },
+};
+
+// ---- which files still need typing: badge + color in Explorer and on tabs ----
+
+const samePath = (a, b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+
+// A folder with unfinished drafts somewhere below it (the repo folder, apps/, apps/web/…):
+// badge = how many files. null when `fsPath` isn't a folder, undefined for "no badge".
+function folderBadge(fsPath) {
+  try {
+    if (!fs.statSync(fsPath).isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  const root = core.closestRoot(fsPath);
+  if (!root) return undefined;
+  const rel = samePath(root, fsPath) ? '' : core.relOf(root, fsPath);
+  if (rel === null) return undefined;
+  if (!rel && core.isActive(root)) {
+    return new vscode.FileDecoration('✍', '👻 Claude is writing in this repo right now', new vscode.ThemeColor('vibeGhost.writingForeground'));
+  }
+  const below = core.listGhosts(root).filter((g) => !rel || g.startsWith(rel + '/'));
+  if (!below.length) return undefined;
+  const n = below.length;
+  const names = below.slice(0, 5).map((g) => `  ${g.slice(rel ? rel.length + 1 : 0)}`);
+  return new vscode.FileDecoration(
+    n > 9 ? '9+' : String(n),
+    [`👻 ${n} unfinished file(s) in here:`, ...names, ...(n > 5 ? [`  …and ${n - 5} more`] : [])].join('\n'),
+    new vscode.ThemeColor('vibeGhost.pendingForeground')
+  );
+}
+
+const fileDecoChanged = new vscode.EventEmitter();
+const fileBadges = {
+  onDidChangeFileDecorations: fileDecoChanged.event,
+  provideFileDecoration(uri) {
+    if (uri.scheme !== 'file') return;
+    const folder = folderBadge(uri.fsPath);
+    if (folder !== null) return folder;
+    const root = rootFor(uri);
+    const rel = root && core.relOf(root, uri.fsPath);
+    if (!rel) return;
+    const act = core.readActive(root);
+    if (act && act.files[rel]) {
+      return new vscode.FileDecoration('✍', '👻 Claude is writing this file right now', new vscode.ThemeColor('vibeGhost.writingForeground'));
+    }
+    const groot = core.ghostRootFor(uri.fsPath);
+    const g = groot && readGhost(core.ghostFile(groot, core.relOf(groot, uri.fsPath)));
+    if (!g) return;
+    const open = vscode.workspace.textDocuments.find((d) => d.uri.fsPath === uri.fsPath);
+    let text = '';
+    try {
+      text = open ? open.getText() : fs.readFileSync(uri.fsPath, 'utf8');
+    } catch {}
+    const p = core.progress(core.splitLines(text), g.lines);
+    if (p.done) return;
+    const d = new vscode.FileDecoration(
+      '👻',
+      `👻 Not finished: ${p.pending} of ${p.total} draft lines left to type`,
+      new vscode.ThemeColor('vibeGhost.pendingForeground')
+    );
+    d.propagate = true; // tint the parent folders so you can find it in the tree
+    return d;
+  },
+};
+
+// ---- focus mode: in a draft file the ghost is the only autocomplete ----
+// IntelliSense popups and AI inline suggestions fight the ghost for the cursor (and for Enter/Tab).
+// While a draft file is active they're switched off in user settings; leaving restores the exact
+// previous values. The backup lives in globalState, so a crash gets restored on next start.
+
+const FOCUS = 'vibeGhost.focusBackup';
+
+function quietSettings() {
+  const cfg = vscode.workspace.getConfiguration();
+  const quiet = {
+    'editor.quickSuggestions': { other: 'off', comments: 'off', strings: 'off' },
+    'editor.suggestOnTriggerCharacters': false,
+    'editor.wordBasedSuggestions': 'off',
+    'github.copilot.nextEditSuggestions.enabled': false,
+  };
+  const cop = cfg.inspect('github.copilot.enable');
+  if (cop && cop.defaultValue !== undefined) {
+    const langs = Object.keys({ ...(cop.defaultValue || {}), ...(cop.globalValue || {}) });
+    quiet['github.copilot.enable'] = Object.fromEntries([...new Set(['*', ...langs])].map((k) => [k, false]));
+  }
+  // only settings that exist here (Copilot may not be installed)
+  return Object.entries(quiet).filter(([k]) => {
+    const i = cfg.inspect(k);
+    return i && i.defaultValue !== undefined;
+  });
+}
+
+const focusWanted = () => {
+  const editor = vscode.window.activeTextEditor;
+  const g = editor && ghostFor(editor.document);
+  return vscode.workspace.getConfiguration('vibeGhost').get('quietOtherCompletions', true) && !!g && !core.isActive(g.root);
+};
+
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+async function enterFocus() {
+  if (ctx.globalState.get(FOCUS)) return;
+  const cfg = vscode.workspace.getConfiguration();
+  const pairs = quietSettings();
+  // saved = { key: [original, ours] }. null original = "was not set", so restoring removes our
+  // value instead of pinning a default. A value that already equals ours is a leftover of ours.
+  const saved = Object.fromEntries(
+    pairs.map(([k, v]) => {
+      const cur = cfg.inspect(k).globalValue;
+      return [k, [cur === undefined || same(cur, v) ? null : cur, v]];
+    })
+  );
+  await ctx.globalState.update(FOCUS, saved);
+  for (const [k, v] of pairs) {
+    try {
+      await cfg.update(k, v, vscode.ConfigurationTarget.Global);
+    } catch {}
+  }
+}
+
+async function leaveFocus() {
+  const saved = ctx && ctx.globalState.get(FOCUS);
+  if (!saved) return;
+  const cfg = vscode.workspace.getConfiguration();
+  for (const [k, [orig, ours]] of Object.entries(saved)) {
+    // changed by you while in the draft file? then your change wins
+    if (!same(cfg.inspect(k).globalValue, ours)) continue;
+    try {
+      await cfg.update(k, orig === null ? undefined : orig, vscode.ConfigurationTarget.Global);
+    } catch {}
+  }
+  await ctx.globalState.update(FOCUS, undefined);
+}
+
+// Serialized so fast tab switching can't interleave a save and a restore.
+let focusChain = Promise.resolve();
+let focusTimer;
+function runFocus() {
+  clearTimeout(focusTimer);
+  focusChain = focusChain.then(() => (focusWanted() ? enterFocus() : leaveFocus())).then(refreshStatus, () => {});
+  return focusChain;
+}
+function updateFocus() {
+  clearTimeout(focusTimer);
+  focusTimer = setTimeout(runFocus, 300);
+}
+
+// VS Code only asks for decorations of rows it renders, and folder tint only bubbles up from
+// decorations it already has. So name every draft file (and repo folder) explicitly, like the
+// git extension does: then a collapsed sub-repo folder still lights up. Previously announced
+// paths are included so finished files lose their badge.
+let announced = new Set();
+function announceDecorations() {
+  const now = new Set();
+  for (const r of roots()) {
+    now.add(r);
+    for (const rel of core.listGhosts(r)) {
+      const parts = rel.split('/');
+      for (let i = 1; i <= parts.length; i++) now.add(path.join(r, ...parts.slice(0, i))); // file + every folder above it
+    }
+    const act = core.readActive(r);
+    if (act) for (const rel of Object.keys(act.files)) now.add(path.join(r, ...rel.split('/')));
+  }
+  const all = [...new Set([...announced, ...now])].map((p) => vscode.Uri.file(p));
+  announced = now;
+  fileDecoChanged.fire(all);
+  return all;
+}
+
+const stats = { rejected: 0 };
+let triggerTimer;
+function onSelection(e) {
+  scheduleRender();
+  if (e.textEditor !== vscode.window.activeTextEditor || !inlineOn() || !ghostFor(e.textEditor.document)) return;
+  clearTimeout(triggerTimer);
+  triggerTimer = setTimeout(() => vscode.commands.executeCommand('editor.action.inlineSuggest.trigger'), 120);
+}
+
+function updateContext() {
+  const editor = vscode.window.activeTextEditor;
+  vscode.commands.executeCommand('setContext', 'vibeGhost.draftOpen', !!(editor && ghostFor(editor.document)));
+}
+
 // Fully typed: the draft has served its purpose.
 function finish(g) {
   if (doneShown.has(g.gp)) return;
@@ -183,26 +433,33 @@ function scheduleRender() {
   timer = setTimeout(() => {
     for (const e of vscode.window.visibleTextEditors) render(e);
     refreshStatus();
+    updateContext();
     lensChanged.fire();
+    announceDecorations();
+    updateFocus();
   }, 60);
 }
 
 // ---- on by default ----
 
-// Git repos get ghost mode automatically. Already-enabled folders get their hook path refreshed,
-// so updating the extension (new install dir) never leaves Claude calling a ghost.js that's gone.
+// Git repos get ghost mode automatically: the opened folder if it is one, else its sub-repos
+// (plus hooks at the top, for a `claude` started there). Already-enabled folders get their hook
+// path refreshed, so updating the extension never leaves Claude calling a ghost.js that's gone.
 async function autoEnable(root) {
   try {
-    const was = setup.isInstalled(root);
+    const repos = setup.reposIn(root);
+    if (!repos.length) return;
+    const was = [root, ...repos].some(setup.isInstalled);
     if (!was) {
       if (!vscode.workspace.getConfiguration('vibeGhost').get('autoEnable', true)) return;
-      if (ctx.globalState.get(DISABLED, []).includes(root) || !setup.isRepo(root)) return;
+      if (ctx.globalState.get(DISABLED, []).includes(root)) return;
     }
-    setup.install(root, bin);
+    setup.enableTree(root, bin);
+    rootsCache = null;
     if (was) return;
     refreshStatus();
     const pick = await vscode.window.showInformationMessage(
-      `👻 Ghost mode is on for ${path.basename(root)}: Claude Code edits become ghost code you type yourself. Already-running claude sessions need a restart.`,
+      `👻 Ghost mode is on for ${repos.map((r) => path.basename(r)).join(', ')}: Claude Code edits become ghost code you type yourself. Already-running claude sessions need a restart.`,
       'Disable here'
     );
     if (pick) await setEnabled(root, false);
@@ -211,14 +468,16 @@ async function autoEnable(root) {
   }
 }
 
+// `root` is an opened folder: it and its sub-repos are switched together.
 async function setEnabled(root, on) {
   const off = ctx.globalState.get(DISABLED, []).filter((r) => r !== root);
   await ctx.globalState.update(DISABLED, on ? off : [...off, root]);
-  if (on) setup.install(root, bin);
-  else setup.uninstall(root);
+  const repos = on ? setup.enableTree(root, bin).repos : setup.disableTree(root);
+  const names = repos.map((r) => path.basename(r)).join(', ') || path.basename(root);
   vscode.window.showInformationMessage(
-    on ? `👻 Ghost mode enabled for ${path.basename(root)}.` : `Ghost mode removed from ${path.basename(root)}. Pending drafts stay in .ghost/.`
+    on ? `👻 Ghost mode enabled for ${names}.` : `Ghost mode removed from ${names}. Pending drafts stay in .ghost/.`
   );
+  rootsCache = null;
   refreshStatus();
 }
 
@@ -288,7 +547,7 @@ function terminalSession(root) {
       .filter((f) => f.endsWith('.jsonl'))
       .map((f) => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }))
       .sort((a, b) => b.t - a.t)[0];
-    return newest && path.basename(newest.f, '.jsonl');
+    return newest && { id: path.basename(newest.f, '.jsonl'), t: newest.t, dir: root };
   } catch {
     return null;
   }
@@ -329,15 +588,18 @@ function runClaude(root, prompt, args) {
   });
 }
 
-async function askClaude(root, prompt) {
-  const sid = vscode.workspace.getConfiguration('vibeGhost').get('askWithSessionContext', true) && terminalSession(root);
-  if (sid) {
+// `dirs`: the file's repo first, then the opened folder (claude may have been started in either).
+async function askClaude(dirs, prompt) {
+  const useCtx = vscode.workspace.getConfiguration('vibeGhost').get('askWithSessionContext', true);
+  const s = useCtx && dirs.map(terminalSession).filter(Boolean).sort((a, b) => b.t - a.t)[0];
+  if (s) {
     // Fork the terminal session: Claude remembers why it wrote the draft, the original stays untouched.
+    // --resume only finds a session from the folder it was started in, so run there.
     try {
-      return await runClaude(root, prompt, ['--resume', sid, '--fork-session']);
+      return await runClaude(s.dir, prompt, ['--resume', s.id, '--fork-session']);
     } catch {}
   }
-  return runClaude(root, prompt, []);
+  return runClaude(dirs[0], prompt, []);
 }
 
 const comment = (body, name) => ({
@@ -365,18 +627,21 @@ function refreshStatus() {
   const off = rs.length && rs.every(core.isOff);
   const marked = rs.some(core.readMark);
   if (!n && !off && !marked) return statusItem.hide();
-  statusItem.text = (off ? '👻 off' : `👻 ${n} to type`) + (marked ? ' · marked' : '');
+  const focus = ctx && ctx.globalState.get(FOCUS);
+  statusItem.text = (off ? '👻 off' : `👻 ${n} to type`) + (marked ? ' · marked' : '') + (focus ? ' · autocomplete off' : '');
   statusItem.tooltip =
     (off ? 'Ghost mode off: Claude edits files directly.' : 'Claude drafts waiting for you to type them') +
-    (marked ? '\nBaseline marked: run "Ghost: Ghostify changes" after your AI tool is done.' : '');
+    (marked ? '\nBaseline marked: run "Ghost: Ghostify changes" after your AI tool is done.' : '') +
+    (focus ? '\nOther autocomplete is paused in this draft file (Ctrl+Space still works). It comes back when you leave it.' : '');
   statusItem.show();
 }
 
 // Paste guard: a big chunk that comes straight out of the draft gets undone.
+let ownEdit = false; // our own Tab-completed comment line
 function onChange(e) {
   scheduleRender();
   const cfg = vscode.workspace.getConfiguration('vibeGhost');
-  if (!cfg.get('blockPaste', true) || e.reason !== undefined || !e.document.isDirty) return;
+  if (ownEdit || !cfg.get('blockPaste', true) || e.reason !== undefined || !e.document.isDirty) return;
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document !== e.document) return;
   const g = ghostFor(e.document);
@@ -394,12 +659,27 @@ function onChange(e) {
   }
 }
 
-async function pickRoot() {
-  const rs = roots();
-  if (rs.length <= 1) return rs[0];
-  const pick = await vscode.window.showQuickPick(rs, { placeHolder: 'Workspace folder' });
-  return pick;
+async function pickFrom(list, placeHolder) {
+  if (list.length <= 1) return list[0];
+  const pick = await vscode.window.showQuickPick(
+    list.map((r) => ({ label: path.basename(r), description: r, r })),
+    { placeHolder }
+  );
+  return pick && pick.r;
 }
+
+// The repo of the file you're in, else ask (sub-repos of the opened folder included).
+async function pickRoot() {
+  const editor = vscode.window.activeTextEditor;
+  if (editor && editor.document.uri.scheme === 'file') {
+    const r = rootFor(editor.document.uri);
+    if (r && roots().includes(r)) return r;
+  }
+  return pickFrom(roots(), 'Which repo?');
+}
+
+// An opened (workspace) folder, for switching ghost mode on/off for it and its sub-repos.
+const pickFolder = () => pickFrom((vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath), 'Which folder?');
 
 const commands = {
   async showDraft() {
@@ -426,12 +706,13 @@ const commands = {
     for (const root of roots()) {
       for (const rel of core.listGhosts(root)) {
         const p = core.fileProgress(root, rel);
-        items.push({ label: rel, description: `${p.total - p.pending}/${p.total} lines typed`, root });
+        const file = path.join(root, ...rel.split('/'));
+        items.push({ label: vscode.workspace.asRelativePath(file), description: `${p.total - p.pending}/${p.total} lines typed`, file });
       }
     }
     if (!items.length) return vscode.window.showInformationMessage('No drafts pending. 👻');
     const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Claude drafts waiting to be typed' });
-    if (pick) vscode.window.showTextDocument(vscode.Uri.file(path.join(pick.root, ...pick.label.split('/'))));
+    if (pick) vscode.window.showTextDocument(vscode.Uri.file(pick.file));
   },
 
   async toggle() {
@@ -478,15 +759,15 @@ const commands = {
     threads.set(thread, st);
 
     const doc = await vscode.workspace.openTextDocument(thread.uri);
-    const root = rootFor(doc.uri);
-    if (!root) return;
+    const dirs = [...new Set([rootFor(doc.uri), wsFolder(doc.uri)].filter(Boolean))];
+    if (!dirs.length) return;
     st.context = st.context || partContext(doc, thread.range.start.line);
 
     st.busy = true;
     const before = [...thread.comments, comment(question, 'You')];
     thread.comments = [...before, comment('$(loading~spin) thinking…', 'Claude')];
     try {
-      const answer = await askClaude(root, buildPrompt(st, question));
+      const answer = await askClaude(dirs, buildPrompt(st, question));
       st.history.push({ q: question, a: answer });
       thread.comments = [...before, comment(answer, 'Claude')];
     } catch (e) {
@@ -497,12 +778,12 @@ const commands = {
   },
 
   async enableHere() {
-    const root = await pickRoot();
+    const root = await pickFolder();
     if (root) await setEnabled(root, true);
   },
 
   async disableHere() {
-    const root = await pickRoot();
+    const root = await pickFolder();
     if (root) await setEnabled(root, false);
   },
 
@@ -539,6 +820,34 @@ const commands = {
       vscode.window.showErrorMessage(`Ghostify failed: ${e.message}`);
     }
     scheduleRender();
+  },
+
+  // Tab while the draft's ghost text is visible: if the line due here is entirely a comment
+  // (/** */ block, //, #), fill in that one line; code is never accepted, Tab just indents.
+  async noAccept() {
+    const editor = vscode.window.activeTextEditor;
+    const doc = editor && editor.document;
+    const g = doc && ghostFor(doc);
+    if (g && vscode.workspace.getConfiguration('vibeGhost').get('tabCompletesComments', true)) {
+      const pos = editor.selection.active;
+      const next = core.ghostLineAt(core.splitLines(doc.getText()), g.lines, pos.line, pos.character);
+      if (next && core.commentLines(g.lines, doc.languageId).has(next.g)) {
+        ownEdit = true; // not a paste: keep the paste guard out of it
+        try {
+          await editor.edit((b) => b.insert(pos, next.text));
+        } finally {
+          ownEdit = false;
+        }
+        return;
+      }
+    }
+    return vscode.commands.executeCommand('tab');
+  },
+
+  async rejectAccept() {
+    stats.rejected++;
+    await vscode.commands.executeCommand('undo');
+    vscode.window.showWarningMessage('👻 Nope. Type it, don\'t accept it.');
   },
 
   closeThread(thread) {
@@ -588,30 +897,54 @@ function activate(context) {
     vscode.workspace.onDidChangeTextDocument(onChange),
     vscode.window.onDidChangeVisibleTextEditors(scheduleRender),
     vscode.window.onDidChangeActiveTextEditor(scheduleRender),
+    vscode.window.onDidChangeTextEditorSelection(onSelection),
+    vscode.languages.registerInlineCompletionItemProvider({ scheme: 'file' }, inlineGhost),
+    vscode.window.registerFileDecorationProvider(fileBadges),
+    fileDecoChanged,
     ...Object.entries(commands).map(([name, fn]) => vscode.commands.registerCommand(`vibeGhost.${name}`, fn))
   );
 
   ctx = context;
   bin = path.join(context.extensionPath, 'bin', 'ghost.js');
   const addFolder = (folder) => {
-    const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, `${core.DIR}/**`));
+    // **/ so sub-repos' .ghost folders are watched too
+    const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, `**/${core.DIR}/**`));
     const changed = (uri) => {
       cache.delete(uri.fsPath);
       doneShown.delete(uri.fsPath);
       scheduleRender();
     };
-    w.onDidCreate(changed);
+    w.onDidCreate((uri) => {
+      rootsCache = null; // a repo may have just got its first .ghost
+      changed(uri);
+    });
     w.onDidChange(changed);
     w.onDidDelete(changed);
     context.subscriptions.push(w);
     autoEnable(folder.uri.fsPath);
   };
   (vscode.workspace.workspaceFolders || []).forEach(addFolder);
-  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders((e) => e.added.forEach(addFolder)));
+
+  // Drafts of docs/styles left from before (or after a config change): apply, don't make anyone type them.
+  const applied = roots().flatMap((r) => core.applyDirect(r).map((rel) => path.basename(rel)));
+  if (applied.length) {
+    vscode.window.showInformationMessage(`👻 Applied ${applied.length} doc/style draft(s) directly, no typing needed: ${applied.join(', ')}`);
+  }
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders((e) => {
+      rootsCache = null;
+      e.added.forEach(addFolder);
+    })
+  );
 
   scheduleRender();
+  return { inlineGhost, fileBadges, announceDecorations, stats, settleFocus: runFocus }; // for the VS Code integration test
 }
 
-function deactivate() {}
+// Window closing: give the user their autocomplete back.
+function deactivate() {
+  return leaveFocus();
+}
 
 module.exports = { activate, deactivate };

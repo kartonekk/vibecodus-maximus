@@ -2,3 +2,5 @@ test/**
 *.vsix
 .ghost/**
 .claude/**
+node_modules/**
+.vscode-test/**

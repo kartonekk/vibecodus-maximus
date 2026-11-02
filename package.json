@@ -2,7 +2,7 @@
   "name": "vibecodus-maximus",
   "displayName": "Vibecodus Maximus: Ghost Code",
   "description": "Claude Code writes drafts as ghost text behind your code. You type them. Only what you type gets committed.",
-  "version": "0.4.0",
+  "version": "0.11.0",
   "publisher": "karton",
   "license": "MIT",
   "icon": "patrick-star.png",
@@ -20,36 +20,156 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "colors": [
+      {
+        "id": "vibeGhost.pendingForeground",
+        "description": "Files (and their folders) with a Claude draft you haven't finished typing.",
+        "defaults": { "dark": "#C586C0", "light": "#A31BA0", "highContrast": "#E5A0E0", "highContrastLight": "#A31BA0" }
+      },
+      {
+        "id": "vibeGhost.writingForeground",
+        "description": "Files Claude is writing during its current turn.",
+        "defaults": { "dark": "#4FC1FF", "light": "#0070C1", "highContrast": "#4FC1FF", "highContrastLight": "#0070C1" }
+      }
+    ],
     "commands": [
-      { "command": "vibeGhost.showDraft", "title": "Show Claude draft side by side", "category": "Ghost" },
-      { "command": "vibeGhost.nextGhost", "title": "Jump to next line to type", "category": "Ghost" },
-      { "command": "vibeGhost.list", "title": "List drafts to type", "category": "Ghost" },
-      { "command": "vibeGhost.discard", "title": "Discard Claude draft for this file", "category": "Ghost" },
-      { "command": "vibeGhost.toggle", "title": "Toggle ghost mode on/off", "category": "Ghost" },
-      { "command": "vibeGhost.recover", "title": "Recover my files after interrupted Claude turn", "category": "Ghost" },
-      { "command": "vibeGhost.openAsk", "title": "Ask Claude about the ghost code here", "category": "Ghost" },
-      { "command": "vibeGhost.enableHere", "title": "Enable ghost mode in this folder", "category": "Ghost" },
-      { "command": "vibeGhost.disableHere", "title": "Disable ghost mode in this folder (remove hooks)", "category": "Ghost" },
-      { "command": "vibeGhost.mark", "title": "Mark baseline (before running another AI tool)", "category": "Ghost" },
-      { "command": "vibeGhost.ghostify", "title": "Ghostify changes (turn AI edits into ghost code)", "category": "Ghost" },
-      { "command": "vibeGhost.ask", "title": "Ask Claude" },
-      { "command": "vibeGhost.closeThread", "title": "Close", "icon": "$(close)" }
+      {
+        "command": "vibeGhost.showDraft",
+        "title": "Show Claude draft side by side",
+        "category": "Ghost"
+      },
+      {
+        "command": "vibeGhost.nextGhost",
+        "title": "Jump to next line to type",
+        "category": "Ghost"
+      },
+      {
+        "command": "vibeGhost.list",
+        "title": "List drafts to type",
+        "category": "Ghost"
+      },
+      {
+        "command": "vibeGhost.discard",
+        "title": "Discard Claude draft for this file",
+        "category": "Ghost"
+      },
+      {
+        "command": "vibeGhost.toggle",
+        "title": "Toggle ghost mode on/off",
+        "category": "Ghost"
+      },
+      {
+        "command": "vibeGhost.recover",
+        "title": "Recover my files after interrupted Claude turn",
+        "category": "Ghost"
+      },
+      {
+        "command": "vibeGhost.openAsk",
+        "title": "Ask Claude about the ghost code here",
+        "category": "Ghost"
+      },
+      {
+        "command": "vibeGhost.enableHere",
+        "title": "Enable ghost mode in this folder",
+        "category": "Ghost"
+      },
+      {
+        "command": "vibeGhost.disableHere",
+        "title": "Disable ghost mode in this folder (remove hooks)",
+        "category": "Ghost"
+      },
+      {
+        "command": "vibeGhost.mark",
+        "title": "Mark baseline (before running another AI tool)",
+        "category": "Ghost"
+      },
+      {
+        "command": "vibeGhost.ghostify",
+        "title": "Ghostify changes (turn AI edits into ghost code)",
+        "category": "Ghost"
+      },
+      {
+        "command": "vibeGhost.ask",
+        "title": "Ask Claude"
+      },
+      {
+        "command": "vibeGhost.closeThread",
+        "title": "Close",
+        "icon": "$(close)"
+      },
+      {
+        "command": "vibeGhost.noAccept",
+        "title": "Indent, or fill in a comment line from the draft"
+      },
+      {
+        "command": "vibeGhost.rejectAccept",
+        "title": "Undo accepted ghost text"
+      }
     ],
     "menus": {
       "comments/commentThread/context": [
-        { "command": "vibeGhost.ask", "group": "inline", "when": "commentController == vibeGhost" }
+        {
+          "command": "vibeGhost.ask",
+          "group": "inline",
+          "when": "commentController == vibeGhost"
+        }
       ],
       "comments/commentThread/title": [
-        { "command": "vibeGhost.closeThread", "group": "inline", "when": "commentController == vibeGhost" }
+        {
+          "command": "vibeGhost.closeThread",
+          "group": "inline",
+          "when": "commentController == vibeGhost"
+        }
       ],
       "commandPalette": [
-        { "command": "vibeGhost.ask", "when": "false" },
-        { "command": "vibeGhost.closeThread", "when": "false" }
+        {
+          "command": "vibeGhost.ask",
+          "when": "false"
+        },
+        {
+          "command": "vibeGhost.closeThread",
+          "when": "false"
+        },
+        {
+          "command": "vibeGhost.noAccept",
+          "when": "false"
+        },
+        {
+          "command": "vibeGhost.rejectAccept",
+          "when": "false"
+        }
       ]
     },
     "keybindings": [
-      { "command": "vibeGhost.nextGhost", "key": "ctrl+alt+g", "mac": "cmd+alt+g", "when": "editorTextFocus" },
-      { "command": "vibeGhost.openAsk", "key": "ctrl+alt+q", "mac": "cmd+alt+q", "when": "editorTextFocus" }
+      {
+        "command": "vibeGhost.nextGhost",
+        "key": "ctrl+alt+g",
+        "mac": "cmd+alt+g",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "vibeGhost.openAsk",
+        "key": "ctrl+alt+q",
+        "mac": "cmd+alt+q",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "vibeGhost.noAccept",
+        "key": "tab",
+        "when": "editorTextFocus && inlineSuggestionVisible && vibeGhost.draftOpen"
+      },
+      {
+        "command": "cursorWordEndRight",
+        "key": "ctrl+right",
+        "mac": "alt+right",
+        "when": "editorTextFocus && inlineSuggestionVisible && vibeGhost.draftOpen"
+      },
+      {
+        "command": "cursorEnd",
+        "key": "end",
+        "mac": "cmd+right",
+        "when": "editorTextFocus && inlineSuggestionVisible && vibeGhost.draftOpen"
+      }
     ],
     "configuration": {
       "title": "Vibecodus Maximus",
@@ -58,6 +178,21 @@
           "type": "boolean",
           "default": true,
           "description": "Undo pastes (or AI completions) that copy a chunk straight out of Claude's draft."
+        },
+        "vibeGhost.inlineGhost": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the draft as real ghost text at the cursor (the rest of the line plus the lines below), which you type over. Tab never accepts it."
+        },
+        "vibeGhost.tabCompletesComments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Tab fills in the next draft line when that whole line is a comment (/** */ blocks, //, and # where # is a comment). Code lines always have to be typed."
+        },
+        "vibeGhost.quietOtherCompletions": {
+          "type": "boolean",
+          "default": true,
+          "description": "While a file with an unfinished draft is active, pause IntelliSense popups and AI inline suggestions so the ghost is the only autocomplete (Ctrl+Space still works). Your previous settings come back as soon as you leave the file."
         },
         "vibeGhost.autoEnable": {
           "type": "boolean",
@@ -93,6 +228,10 @@
     }
   },
   "scripts": {
-    "test": "node test/run.js"
+    "test": "node test/run.js",
+    "test:vscode": "node test/vscode/run.js"
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "^2.4.1"
   }
 }

@@ -8,9 +8,11 @@
 //   node bin/ghost.js status|out|on|off [dir]
 //   node bin/ghost.js mark|ghostify|unmark [dir]   for AI tools without hooks
 //   node bin/ghost.js run -- <tool> [args...]       mark + run + ghostify
+//   node bin/ghost.js apply-direct [dir]            apply drafts of *.md/*.css (no typing needed)
 //   node bin/ghost.js precommit         (called from .git/hooks/pre-commit)
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const core = require('../lib/core');
@@ -34,39 +36,66 @@ function hook() {
   try {
     data = JSON.parse(readStdin() || '{}');
   } catch {}
-  const root = process.env.CLAUDE_PROJECT_DIR || core.findRoot(data.cwd || process.cwd());
+  // The folder claude runs in. It may hold several repos (sub-repos); each keeps its own .ghost.
+  const project = process.env.CLAUDE_PROJECT_DIR || core.findRoot(data.cwd || process.cwd());
   try {
-    handle(root, data);
+    handle(project, data);
   } catch (err) {
-    core.logError(root, err); // never break Claude over this
+    core.logError(core.findRoot(project), err); // never break Claude over this
   }
   process.exit(0);
 }
 
-function handle(root, data) {
+// Repos touched this session that live outside the project folder, so Stop finds them too.
+const touchedFile = (data) => path.join(os.tmpdir(), `vibe-ghost-${String(data.session_id || 'x').replace(/[^\w-]/g, '')}.json`);
+
+function touched(data) {
+  try {
+    return JSON.parse(fs.readFileSync(touchedFile(data), 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+// Every ghost root this hook cares about: the project's repo, repos below it, repos touched.
+function rootsFor(project, data) {
+  return [...new Set([core.findRoot(project), ...core.nestedRoots(project), ...touched(data)])];
+}
+
+const shown = (project, root, rel) => path.relative(project, path.join(root, rel)).split(path.sep).join('/');
+
+function handle(project, data) {
   const event = data.hook_event_name;
-  const off = core.isOff(root);
 
   if (event === 'SessionStart') {
-    if (core.isActive(root)) core.swapOut(root); // previous turn was interrupted
+    for (const r of rootsFor(project, data)) if (core.isActive(r)) core.swapOut(r); // interrupted turn
     return;
   }
 
   if (event === 'UserPromptSubmit') {
-    if (core.isActive(root)) core.swapOut(root);
-    if (off) return;
-    const pending = core.listGhosts(root).map((rel) => {
-      const p = core.fileProgress(root, rel);
-      return `  ${rel}: user typed ${p.total - p.pending}/${p.total} lines`;
-    });
-    core.swapInAll(root);
+    const roots = rootsFor(project, data);
+    for (const r of roots) if (core.isActive(r)) core.swapOut(r);
+    const on = roots.filter((r) => !core.isOff(r));
+    if (!on.length) return;
+    const pending = [];
+    const direct = new Set();
+    for (const r of on) {
+      core.applyDirect(r); // drafts of files that no longer need typing
+      core.config(r).direct.forEach((p) => direct.add(p));
+      for (const rel of core.listGhosts(r)) {
+        const p = core.fileProgress(r, rel);
+        pending.push(`  ${shown(project, r, rel)}: user typed ${p.total - p.pending}/${p.total} lines`);
+      }
+      core.swapInAll(r);
+    }
     process.stdout.write(
       [
         '[ghost mode] Your file edits are NOT applied to the user\'s code. When your turn ends they become',
         'ghost drafts the user retypes by hand in VS Code; only what they type gets committed.',
         'During your turn the disk holds your drafts, so read/edit/test as normal. Keep diffs small and',
         'focused: the user types every line. Never touch .ghost/. The user\'s real typed version of a',
-        'drafted file is at .ghost/user/<path> while you work.',
+        'drafted file is at <its repo>/.ghost/user/<path> while you work.',
+        `Exception: edits to ${[...direct].join(', ')} files are applied directly (nobody retypes those).`,
         ...(pending.length ? ['Pending drafts:', ...pending] : []),
       ].join('\n') + '\n'
     );
@@ -74,19 +103,26 @@ function handle(root, data) {
   }
 
   if (event === 'PreToolUse') {
-    if (off) return;
-    const input = data.tool_input || {};
-    const file = input.file_path;
+    const file = (data.tool_input || {}).file_path;
     if (!file) return;
-    const rel = core.relOf(root, path.resolve(data.cwd || root, file));
+    const abs = path.resolve(data.cwd || project, file);
+    // The draft goes to the file's own repo, not necessarily the folder claude started in.
+    const root = core.closestRoot(path.dirname(abs)) || project;
+    if (core.isOff(root)) return;
+    const rel = core.relOf(root, abs);
     if (!rel) return;
-    core.swapIn(root, rel, { write: WRITE_TOOLS.has(data.tool_name) });
+    if (core.swapIn(root, rel, { write: WRITE_TOOLS.has(data.tool_name) })) {
+      const list = touched(data);
+      if (!list.includes(root)) fs.writeFileSync(touchedFile(data), JSON.stringify([...list, root]));
+    }
     return;
   }
 
   if (event === 'Stop') {
-    if (!core.isActive(root)) return;
-    const drafted = core.swapOut(root);
+    const drafted = [];
+    for (const r of rootsFor(project, data)) {
+      if (core.isActive(r)) drafted.push(...core.swapOut(r).map((rel) => shown(project, r, rel)));
+    }
     if (drafted.length) {
       const msg = `👻 ${drafted.length} draft(s) to type: ${drafted.join(', ')}`;
       process.stdout.write(JSON.stringify({ systemMessage: msg }) + '\n');
@@ -97,16 +133,16 @@ function handle(root, data) {
 // ---- install ----
 
 function install(dir) {
-  const root = path.resolve(dir);
-  const changed = setup.install(root, SELF);
+  const { changed, repos } = setup.enableTree(path.resolve(dir), SELF);
   for (const p of changed) console.log(`updated ${p}`);
   if (!changed.length) console.log('Already set up.');
-  if (!setup.isRepo(root)) console.log('Not a git repo: skipped the pre-commit guard (run install again after git init).');
+  if (!repos.length) console.log('No git repo here or below: hooks only, no pre-commit guard (run install again after git init).');
+  else console.log(`Repos: ${repos.join(', ')}`);
   console.log('\nDone. Restart claude in that folder; open it in VS Code with the extension installed.');
 }
 
 function uninstall(dir) {
-  setup.uninstall(path.resolve(dir));
+  setup.disableTree(path.resolve(dir));
   console.log('Hooks removed. Drafts kept in .ghost/files (delete the folder to drop them).');
 }
 
@@ -173,6 +209,14 @@ switch (cmd) {
   case 'ghostify':
     report(core.ghostify(target()));
     break;
+  case 'apply-direct': {
+    // existing drafts of docs/styles (or whatever .ghost/config.json lists): apply them, no typing
+    const root = target();
+    const applied = core.applyDirect(root);
+    for (const rel of applied) console.log(`applied ${rel}`);
+    console.log(applied.length ? `${applied.length} direct file(s) applied.` : 'No direct drafts.');
+    break;
+  }
   case 'run': {
     // ghost.js run -- <tool> [args...]: mark, run the tool, ghostify what it changed
     const rest = process.argv.slice(process.argv.indexOf('--') + 1);
@@ -200,9 +244,10 @@ switch (cmd) {
     console.log('       ghost.js run -- <command> [args...]');
 }
 
-function report({ base, drafted, skipped }) {
+function report({ base, drafted, skipped, direct }) {
   console.log(`\n👻 Changes since ${base === 'mark' ? 'your mark' : 'last commit (no mark set)'}:`);
   if (!drafted.length) console.log('   nothing to type.');
   for (const rel of drafted) console.log(`   draft  ${rel}`);
+  for (const rel of direct) console.log(`   kept   ${rel} (docs/styles, applied directly)`);
   for (const rel of skipped) console.log(`   kept   ${rel} (binary, left as the tool wrote it)`);
 }

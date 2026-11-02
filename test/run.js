@@ -80,6 +80,40 @@ test('pure insert block: lens sits on the line where the block goes', () => {
   assert.deepStrictEqual(hs, [{ lens: 1, start: 0, end: 0, gFrom: 1, gTo: 3 }]);
 });
 
+test('ghostAt: rest of line + block below, typed over as you go', () => {
+  // empty file: whole draft is ghost text at the cursor
+  assert.strictEqual(core.ghostAt([''], ghost, 0, 0), ghost.join('\n'));
+  // half-typed line: remainder of it, then the lines still to come
+  const user = ['function add(a, b) {', '  ret'];
+  assert.strictEqual(core.ghostAt(user, ghost, 1, 5), 'urn a + b;\n}\n\nmodule.exports = add;');
+  // end of a finished line with new lines due below it
+  assert.strictEqual(core.ghostAt(['a', 'e'], ['a', 'b', 'c', 'e'], 0, 1), '\nb\nc');
+  // typo or cursor mid-line: nothing
+  assert.strictEqual(core.ghostAt(['function add(a, b) {', '  rx'], ghost, 1, 4), null);
+  assert.strictEqual(core.ghostAt(['function add(a, b) {', '  ret'], ghost, 1, 3), null);
+  // fully typed: nothing
+  assert.strictEqual(core.ghostAt(ghost, ghost, 1, 16), null);
+});
+
+test('commentLines: /** */ blocks, //, # (not where # is code)', () => {
+  const ts = ['/**', ' * Goes up.', ' */', 'const x = 1; // trailing', '// whole line', '/* one */', '/* a */ code()', '  * 2', '#x'];
+  assert.deepStrictEqual([...core.commentLines(ts, 'typescript')].sort(), [0, 1, 2, 4, 5, 8]);
+  assert.deepStrictEqual([...core.commentLines(['# note', 'x = 1  # inline', '"""doc"""'], 'python')], [0]);
+  assert.deepStrictEqual([...core.commentLines(['#header {', '/* c */'], 'css')], [1]);
+});
+
+test('ghostLineAt: one line for Tab, never more', () => {
+  const g = ['def f():', '    # explain', '    return 1'];
+  // end of "def f():" with new lines due: newline + the comment line only
+  assert.deepStrictEqual(core.ghostLineAt(['def f():'], g, 0, 8), { text: '\n    # explain', g: 1 });
+  // already on the empty line where it goes: the whole line
+  assert.deepStrictEqual(core.ghostLineAt(['def f():', ''], g, 1, 0), { text: '    # explain', g: 1 });
+  // half-typed comment: the rest of it
+  assert.deepStrictEqual(core.ghostLineAt(['def f():', '    # exp'], g, 1, 9), { text: 'lain', g: 1 });
+  // blank draft lines before it come along
+  assert.deepStrictEqual(core.ghostLineAt(['a'], ['a', '', '// c'], 0, 1), { text: '\n\n// c', g: 2 });
+});
+
 // ---- full turn through the hook CLI ----
 
 function hook(root, payload) {
@@ -109,6 +143,8 @@ test('install wires hooks, gitignore, pre-commit', () => {
 });
 
 test('Claude turn: edits become drafts, user file restored', () => {
+  const old = new Date('2020-01-01');
+  fs.utimesSync(path.join(tmp, 'app.js'), old, old);
   hook(tmp, { hook_event_name: 'UserPromptSubmit', prompt: 'add stuff' });
   // Claude edits an existing file and creates a new one
   hook(tmp, { hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: path.join(tmp, 'app.js') } });
@@ -121,6 +157,8 @@ test('Claude turn: edits become drafts, user file restored', () => {
   const out = hook(tmp, { hook_event_name: 'Stop' });
   assert.match(JSON.parse(out).systemMessage, /2 draft/);
   assert.strictEqual(read('app.js'), 'const x = 1;\n');
+  // restored file must look NEWER than Claude's version, or VS Code keeps showing Claude's code
+  assert.ok(fs.statSync(path.join(tmp, 'app.js')).mtimeMs > Date.now() - 60000, 'restore gets a fresh mtime');
   assert.strictEqual(read('lib/new.js'), '');
   assert.strictEqual(read('.ghost/files/app.js'), 'const x = 1;\nconst y = 2;\n');
   assert.deepStrictEqual(core.listGhosts(tmp), ['app.js', 'lib/new.js']);
@@ -260,6 +298,87 @@ test('auto-enable: quiet when nothing changed, repoints hooks after extension up
   const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-plain-'));
   assert.ok(!setup.isRepo(plain));
   fs.rmSync(plain, { recursive: true });
+});
+
+test('sub-repos: claude started in the parent folder drafts into the file\'s own repo', () => {
+  const setup = require('../lib/install');
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-parent-'));
+  const sub = path.join(parent, 'console');
+  fs.mkdirSync(path.join(sub, 'src'), { recursive: true });
+  execSync('git init -q', { cwd: sub });
+  fs.writeFileSync(path.join(sub, 'src', 'a.ts'), 'const a = 1;\n');
+
+  const { repos } = setup.enableTree(parent, BIN);
+  assert.deepStrictEqual(repos, [sub]);
+  assert.ok(setup.isInstalled(parent), 'hooks at the parent (claude may start there)');
+  assert.ok(setup.isInstalled(sub), 'hooks in the sub-repo');
+  assert.ok(!fs.existsSync(path.join(parent, '.gitignore')), 'no .gitignore in a non-repo parent');
+
+  const session = { session_id: 'sub-test' };
+  hook(parent, { ...session, hook_event_name: 'UserPromptSubmit', prompt: 'x' });
+  const file = path.join(sub, 'src', 'a.ts');
+  hook(parent, { ...session, hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: file } });
+  fs.writeFileSync(file, 'const a = 1;\nconst b = 2;\n');
+  const out = hook(parent, { ...session, hook_event_name: 'Stop' });
+  assert.match(JSON.parse(out).systemMessage, /console\/src\/a\.ts/);
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), 'const a = 1;\n', 'user file restored');
+  assert.strictEqual(fs.readFileSync(core.ghostFile(sub, 'src/a.ts'), 'utf8'), 'const a = 1;\nconst b = 2;\n');
+  assert.ok(!fs.existsSync(path.join(parent, '.ghost', 'files', 'console')), 'nothing parked in the parent');
+  assert.strictEqual(core.ghostRootFor(file), sub);
+  assert.deepStrictEqual(core.nestedRoots(parent), [sub]);
+
+  // next prompt from the parent: the sub-repo draft is swapped in for Claude
+  hook(parent, { ...session, hook_event_name: 'UserPromptSubmit', prompt: 'y' });
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), 'const a = 1;\nconst b = 2;\n');
+  hook(parent, { ...session, hook_event_name: 'Stop' });
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), 'const a = 1;\n');
+  fs.rmSync(parent, { recursive: true, force: true });
+});
+
+test('repo nobody installed in: .ghost/ kept out of git status via info/exclude', () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-bare-'));
+  execSync('git init -q', { cwd: repo });
+  fs.writeFileSync(path.join(repo, 'x.js'), 'x\n');
+  core.swapIn(repo, 'x.js', { write: true });
+  fs.writeFileSync(path.join(repo, 'x.js'), 'x\ny\n');
+  core.swapOut(repo);
+  const status = execSync('git status --porcelain', { cwd: repo }).toString();
+  assert.doesNotMatch(status, /\.ghost/);
+  fs.rmSync(repo, { recursive: true, force: true });
+});
+
+test('direct files: Claude\'s *.md/*.css edits land for real, code still becomes a draft', () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'vibe-direct-'));
+  execSync('git init -q', { cwd: repo });
+  const w = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+    fs.writeFileSync(path.join(repo, rel), text);
+  };
+  w('src/a.ts', 'a\n');
+  w('src/CLAUDE.md', 'docs\n');
+  w('styles/x.css', '.a{}\n');
+  hook(repo, { hook_event_name: 'UserPromptSubmit', prompt: 'x' });
+  for (const rel of ['src/a.ts', 'src/CLAUDE.md', 'styles/x.css']) {
+    hook(repo, { hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: path.join(repo, rel) } });
+  }
+  w('src/a.ts', 'a\nb\n');
+  w('src/CLAUDE.md', 'docs\nmore docs\n');
+  w('styles/x.css', '.a{}\n.b{}\n');
+  hook(repo, { hook_event_name: 'Stop' });
+  const r = (rel) => fs.readFileSync(path.join(repo, rel), 'utf8');
+  assert.strictEqual(r('src/a.ts'), 'a\n', 'code restored, waits as a draft');
+  assert.deepStrictEqual(core.listGhosts(repo), ['src/a.ts']);
+  assert.strictEqual(r('src/CLAUDE.md'), 'docs\nmore docs\n', 'md applied directly');
+  assert.strictEqual(r('styles/x.css'), '.a{}\n.b{}\n', 'css applied directly');
+
+  // config override + old drafts made before the rule get applied
+  fs.writeFileSync(core.paths(repo).config, JSON.stringify({ direct: ['*.md', '*.css', 'src/*.ts'] }));
+  assert.ok(core.isDirect(repo, 'src/a.ts') && !core.isDirect(repo, 'lib/a.ts'));
+  assert.deepStrictEqual(core.applyDirect(repo), ['src/a.ts']);
+  assert.strictEqual(r('src/a.ts'), 'a\nb\n');
+  assert.deepStrictEqual(core.listGhosts(repo), []);
+  assert.ok(core.isDirect(repo, 'README.MD'), 'case-insensitive');
+  fs.rmSync(repo, { recursive: true, force: true });
 });
 
 test('uninstall removes hooks', () => {

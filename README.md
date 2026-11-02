@@ -10,7 +10,7 @@ When the file matches the draft, the draft disappears.
 ## Setup
 
 ```bash
-code --install-extension vibecodus-maximus-0.4.0.vsix
+code --install-extension vibecodus-maximus-0.11.0.vsix
 ```
 
 That's it. Ghost mode is **on by default**: open any git repo in VS Code and the extension wires it up,
@@ -27,6 +27,36 @@ Each VS Code start it re-points the hooks at the current extension install, so u
 - Opt one folder out: `Ghost: Disable ghost mode in this folder` (or click *Disable here* on the first notification). It stays off.
 - Opt out everywhere: setting `vibeGhost.autoEnable: false`, then enable folders one by one with `Ghost: Enable ghost mode in this folder`.
 - Non-git folders are never enabled automatically. Without VS Code: `node bin/ghost.js install <dir>`.
+
+### Docs and styles are not typed
+
+Claude's edits to `*.md` (`CLAUDE.md` included) and `*.css` land in your files directly: no draft, no
+typing, ghostify leaves them too. Change the list per repo in `<repo>/.ghost/config.json`:
+
+```json
+{ "direct": ["*.md", "*.css", "*.scss", "docs/**/*.txt"] }
+```
+
+A pattern without `/` matches the file name anywhere; `**/` crosses folders. Drafts that match after you
+change the list are applied on the next prompt or VS Code start (or now: `node bin/ghost.js apply-direct`).
+
+### Sub-repos (a folder full of repos)
+
+Open the parent folder (e.g. `projects/` holding `web-app/`, `api/`…) and every
+repo up to two levels down gets set up. The parent itself gets the Claude hooks only, so `claude`
+started there works too. Each draft lives in **the edited file's own repo** (`<repo>/.ghost/`), no
+matter where `claude` was started, so ghosts, badges and Ask Claude work the same either way.
+Turn one repo off with `Ghost: Toggle ghost mode` while a file from it is open.
+
+### Can I stop and come back later?
+
+Yes. Drafts are plain files in `<repo>/.ghost/files/` and your typing is in your normal files, so both
+survive closing VS Code, switching to other repos, reboots, and new `claude` sessions. Pick up where
+you left off: the 👻 badges show which files are unfinished. Two things to know:
+
+- `git clean -fdx` deletes ignored files, `.ghost/` included: that throws drafts away.
+- Drafts are per path, not per branch. On another branch the ghost compares against that branch's
+  version of the file; switch back and it lines up again.
 
 Recommended: turn on `files.autoSave` (`afterDelay`). The hooks work on files on disk, so unsaved typing is invisible to them.
 
@@ -47,7 +77,11 @@ turn how far you've got typing each draft.
 
 | | |
 |---|---|
-| ghost text after cursor line | rest of the line to type |
+| ghost text at the cursor | the rest of the line **plus the new lines below it**, rendered in place like Copilot ghost text: just type over it. `Tab` indents and never accepts code (accepting any other way gets undone). **Exception:** when the line due is entirely a comment (`/** */` blocks, `//`, `#` where # is a comment) `Tab` fills in that one line. Off: `vibeGhost.tabCompletesComments`. Put the cursor at the end of the line above a `👻 +N ↓` marker (or hit `Ctrl+Alt+G`) to see a block |
+| ghost text after other lines | rest of the line to type |
+| 👻 badge + purple name (Explorer, tabs) | file still has draft lines to type; hover shows how many. ✍ = Claude is writing it right now. Disappears when you finished typing |
+| status bar `· autocomplete off` | you are in a draft file, so IntelliSense popups and AI inline suggestions are paused and the ghost is the only autocomplete (`Ctrl+Space` still works). Leave the file and your settings come back exactly as they were. Turn off with `vibeGhost.quietOtherCompletions` |
+| number badge on folders | how many unfinished files are somewhere inside (repo folder, `apps/`, `components/`…), even while collapsed; hover lists them |
 | `👻 +3 ↓ code…` | 3 lines to type below (hover to see all); press Enter at the end of the line and the next one appears in place |
 | red background + `👻 expected` | you typed something different |
 | faded strike-through | line Claude's draft doesn't have |
