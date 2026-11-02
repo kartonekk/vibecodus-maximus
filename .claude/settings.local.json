@@ -1,0 +1,49 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"c:/Users/itali/.vscode/extensions/karton.vibecodus-maximus-0.4.0/bin/ghost.js\" hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"c:/Users/itali/.vscode/extensions/karton.vibecodus-maximus-0.4.0/bin/ghost.js\" hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"c:/Users/itali/.vscode/extensions/karton.vibecodus-maximus-0.4.0/bin/ghost.js\" hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"c:/Users/itali/.vscode/extensions/karton.vibecodus-maximus-0.4.0/bin/ghost.js\" hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

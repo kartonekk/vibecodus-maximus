@@ -1,0 +1,4 @@
+test/**
+*.vsix
+.ghost/**
+.claude/**

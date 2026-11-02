@@ -1,0 +1,98 @@
+{
+  "name": "vibecodus-maximus",
+  "displayName": "Vibecodus Maximus: Ghost Code",
+  "description": "Claude Code writes drafts as ghost text behind your code. You type them. Only what you type gets committed.",
+  "version": "0.4.0",
+  "publisher": "karton",
+  "license": "MIT",
+  "icon": "patrick-star.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "bin": {
+    "vibe-ghost": "./bin/ghost.js"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      { "command": "vibeGhost.showDraft", "title": "Show Claude draft side by side", "category": "Ghost" },
+      { "command": "vibeGhost.nextGhost", "title": "Jump to next line to type", "category": "Ghost" },
+      { "command": "vibeGhost.list", "title": "List drafts to type", "category": "Ghost" },
+      { "command": "vibeGhost.discard", "title": "Discard Claude draft for this file", "category": "Ghost" },
+      { "command": "vibeGhost.toggle", "title": "Toggle ghost mode on/off", "category": "Ghost" },
+      { "command": "vibeGhost.recover", "title": "Recover my files after interrupted Claude turn", "category": "Ghost" },
+      { "command": "vibeGhost.openAsk", "title": "Ask Claude about the ghost code here", "category": "Ghost" },
+      { "command": "vibeGhost.enableHere", "title": "Enable ghost mode in this folder", "category": "Ghost" },
+      { "command": "vibeGhost.disableHere", "title": "Disable ghost mode in this folder (remove hooks)", "category": "Ghost" },
+      { "command": "vibeGhost.mark", "title": "Mark baseline (before running another AI tool)", "category": "Ghost" },
+      { "command": "vibeGhost.ghostify", "title": "Ghostify changes (turn AI edits into ghost code)", "category": "Ghost" },
+      { "command": "vibeGhost.ask", "title": "Ask Claude" },
+      { "command": "vibeGhost.closeThread", "title": "Close", "icon": "$(close)" }
+    ],
+    "menus": {
+      "comments/commentThread/context": [
+        { "command": "vibeGhost.ask", "group": "inline", "when": "commentController == vibeGhost" }
+      ],
+      "comments/commentThread/title": [
+        { "command": "vibeGhost.closeThread", "group": "inline", "when": "commentController == vibeGhost" }
+      ],
+      "commandPalette": [
+        { "command": "vibeGhost.ask", "when": "false" },
+        { "command": "vibeGhost.closeThread", "when": "false" }
+      ]
+    },
+    "keybindings": [
+      { "command": "vibeGhost.nextGhost", "key": "ctrl+alt+g", "mac": "cmd+alt+g", "when": "editorTextFocus" },
+      { "command": "vibeGhost.openAsk", "key": "ctrl+alt+q", "mac": "cmd+alt+q", "when": "editorTextFocus" }
+    ],
+    "configuration": {
+      "title": "Vibecodus Maximus",
+      "properties": {
+        "vibeGhost.blockPaste": {
+          "type": "boolean",
+          "default": true,
+          "description": "Undo pastes (or AI completions) that copy a chunk straight out of Claude's draft."
+        },
+        "vibeGhost.autoEnable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Turn ghost mode on automatically in every git repo you open: wires Claude Code hooks (.claude/settings.local.json), .gitignore and a pre-commit guard. Opt a folder out with \"Ghost: Disable ghost mode in this folder\"."
+        },
+        "vibeGhost.askLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show \"💬 Ask Claude about this\" above each ghost part."
+        },
+        "vibeGhost.askWithSessionContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Fork your latest Claude Code session in this folder for questions, so Claude remembers why it wrote the draft. Your terminal session is not modified."
+        },
+        "vibeGhost.claudePath": {
+          "type": "string",
+          "default": "claude",
+          "description": "Claude Code executable."
+        },
+        "vibeGhost.askModel": {
+          "type": "string",
+          "default": "",
+          "description": "Model for questions (e.g. sonnet, haiku). Empty = Claude Code default."
+        },
+        "vibeGhost.pasteThreshold": {
+          "type": "number",
+          "default": 40,
+          "description": "Minimum characters (whitespace squashed) before a paste counts as copying the draft."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node test/run.js"
+  }
+}
