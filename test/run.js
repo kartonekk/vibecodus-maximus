@@ -94,6 +94,17 @@ test('auto-closed quote/bracket is a gap to fill, not a typo', () => {
   assert.deepStrictEqual(core.tabFill(['// abc def'], ['// abc def ghi'], 0, 10, 'typescript'), { line: 0, from: 10, to: 10, text: ' ghi' });
 });
 
+test('auto-closed bracket mid-line: ghost inside and after it', () => {
+  const draft = 'if (ok(a), b) {';
+  assert.deepStrictEqual(core.lineDiff('if ()', draft), { kind: 'suffix', text: 'ok(a), b', at: 4, more: [{ at: 5, text: ' {' }] });
+  assert.strictEqual(core.ghostAt(['if ()'], [draft], 0, 4), 'ok(a), b) {');
+  // nested auto-close: `if (ok())`
+  assert.deepStrictEqual(core.lineDiff('if (ok())', draft), { kind: 'suffix', text: 'a', at: 7, more: [{ at: 8, text: ', b' }, { at: 9, text: ' {' }] });
+  assert.strictEqual(core.ghostAt(['if (ok())'], [draft], 0, 7), 'a), b) {');
+  assert.strictEqual(core.lineDiff('x = "";', 'x = "hi";').text, 'hi');
+  assert.strictEqual(core.lineDiff('if (x)', draft).kind, 'mismatch');
+});
+
 test('ghostAt: rest of line + block below, typed over as you go', () => {
   // empty file: whole draft is ghost text at the cursor
   assert.strictEqual(core.ghostAt([''], ghost, 0, 0), ghost.join('\n'));

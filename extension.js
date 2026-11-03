@@ -157,11 +157,14 @@ function render(editor) {
       const want = g.lines[op.g];
       const d = core.lineDiff(u, want);
       if (d.kind === 'suffix') {
-        const end = new vscode.Position(op.u, d.at); // the gap before an auto-closed quote/bracket, or the end
-        out.suffix.push({
-          range: new vscode.Range(end, end),
-          renderOptions: { after: { contentText: show(d.text, tabSize) } },
-        });
+        // the gap before an auto-closed quote/bracket (plus any after it), or the end
+        for (const part of [d, ...(d.more || [])]) {
+          const end = new vscode.Position(op.u, part.at);
+          out.suffix.push({
+            range: new vscode.Range(end, end),
+            renderOptions: { after: { contentText: show(part.text, tabSize) } },
+          });
+        }
       } else if (d.kind === 'mismatch') {
         out.mismatch.push({
           range: new vscode.Range(op.u, d.col, op.u, Math.max(u.length, d.col)),
