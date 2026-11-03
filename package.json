@@ -2,7 +2,7 @@
   "name": "vibecodus-maximus",
   "displayName": "Vibecodus Maximus: Ghost Code",
   "description": "Claude Code writes drafts as ghost text behind your code. You type them. Only what you type gets committed.",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "publisher": "karton",
   "license": "MIT",
   "icon": "patrick-star.png",
@@ -24,12 +24,22 @@
       {
         "id": "vibeGhost.pendingForeground",
         "description": "Files (and their folders) with a Claude draft you haven't finished typing.",
-        "defaults": { "dark": "#C586C0", "light": "#A31BA0", "highContrast": "#E5A0E0", "highContrastLight": "#A31BA0" }
+        "defaults": {
+          "dark": "#C586C0",
+          "light": "#A31BA0",
+          "highContrast": "#E5A0E0",
+          "highContrastLight": "#A31BA0"
+        }
       },
       {
         "id": "vibeGhost.writingForeground",
         "description": "Files Claude is writing during its current turn.",
-        "defaults": { "dark": "#4FC1FF", "light": "#0070C1", "highContrast": "#4FC1FF", "highContrastLight": "#0070C1" }
+        "defaults": {
+          "dark": "#4FC1FF",
+          "light": "#0070C1",
+          "highContrast": "#4FC1FF",
+          "highContrastLight": "#0070C1"
+        }
       }
     ],
     "commands": [

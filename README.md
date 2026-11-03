@@ -10,7 +10,7 @@ When the file matches the draft, the draft disappears.
 ## Setup
 
 ```bash
-code --install-extension vibecodus-maximus-0.14.0.vsix
+code --install-extension vibecodus-maximus-0.15.0.vsix
 ```
 
 That's it. Ghost mode is **on by default**: open any git repo in VS Code and the extension wires it up,
