@@ -69,4 +69,12 @@ exports.run = async () => {
     assert.ok(announced.includes(path.join(sub, 'src').toLowerCase()), 'folders in between announced');
     assert.strictEqual(api.fileBadges.provideFileDecoration(vscode.Uri.file(ws)), undefined, 'plain parent: no badge of its own');
   });
+
+  await test('Ghost Code view shows the sub-repo draft under its folders', async () => {
+    const top = api.ghostTree.getChildren();
+    assert.deepStrictEqual(top.map((n) => api.ghostTree.getTreeItem(n).label), ['console/src'], 'repo folder + src in one row');
+    const [f] = api.ghostTree.getChildren(top[0]);
+    assert.strictEqual(f.fsPath.toLowerCase(), file.toLowerCase());
+    assert.ok(!api.ghostTree.getChildren(top[0]).some((n) => n.kind === 'folder'), 'empty docs/ folder not shown');
+  });
 };

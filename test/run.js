@@ -120,6 +120,15 @@ test('ghostAt: rest of line + block below, typed over as you go', () => {
   assert.strictEqual(core.ghostAt(ghost, ghost, 1, 16), null);
 });
 
+test('ghostCol: where the cursor has to be for the ghost to show', () => {
+  assert.strictEqual(core.ghostCol([''], ghost, 0), 0, 'empty file: the top');
+  assert.strictEqual(core.ghostCol(['function add(a, b) {', '  ret'], ghost, 1), 5, 'right after what you typed');
+  assert.strictEqual(core.ghostCol(['a', 'e'], ['a', 'b', 'c', 'e'], 0), 1, 'end of the line above a block');
+  assert.strictEqual(core.ghostCol(['const s = "hello";'], ['const s = "hello world";'], 0), 16, 'auto-closed quote: the gap');
+  assert.strictEqual(core.ghostCol(['function add(a, b) {', '  rx'], ghost, 1), null, 'typo: no ghost');
+  assert.strictEqual(core.ghostCol(ghost, ghost, 1), null, 'nothing left');
+});
+
 test('commentLines: /** */ blocks, //, # (not where # is code)', () => {
   const ts = ['/**', ' * Goes up.', ' */', 'const x = 1; // trailing', '// whole line', '/* one */', '/* a */ code()', '  * 2', '#x'];
   assert.deepStrictEqual([...core.commentLines(ts, 'typescript')].sort(), [0, 1, 2, 4, 5, 8]);

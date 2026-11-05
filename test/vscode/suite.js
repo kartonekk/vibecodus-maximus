@@ -110,6 +110,43 @@ exports.run = async () => {
     fs.rmSync(active);
   });
 
+  await test('Ghost Code view: only files with drafts, inside their (compacted) folders', async () => {
+    const tree = api.ghostTree;
+    const label = (n) => {
+      const i = tree.getTreeItem(n);
+      return typeof i.label === 'string' ? i.label : i.label ? i.label.label : path.basename(i.resourceUri.fsPath);
+    };
+    const draftAt = (rel, text) => {
+      fs.mkdirSync(path.dirname(path.join(ws, rel)), { recursive: true });
+      fs.writeFileSync(path.join(ws, rel), '');
+      fs.mkdirSync(path.dirname(core.ghostFile(ws, rel)), { recursive: true });
+      fs.writeFileSync(core.ghostFile(ws, rel), text);
+    };
+    draftAt('src/deep/x.ts', 'export const x = 1;\n');
+    let top = tree.getChildren();
+    assert.deepStrictEqual(top.map(label), ['src/deep', 'app.ts', 'quote.ts'], 'folders first, single-folder chain in one row, no other files');
+    const [x] = tree.getChildren(top[0]);
+    assert.strictEqual(label(x), 'x.ts');
+    assert.strictEqual(tree.getTreeItem(x).description, '1 left');
+    assert.strictEqual(tree.getTreeItem(x).contextValue, 'ghostFile');
+
+    draftAt('src/y.ts', 'export const y = 2;\n');
+    top = tree.getChildren();
+    assert.strictEqual(label(top[0]), 'src', 'src holds a folder and a file now: no compacting');
+    assert.deepStrictEqual(tree.getChildren(top[0]).map(label), ['deep', 'y.ts']);
+
+    // Claude mid-turn: its files show as being written
+    const active = path.join(ws, '.ghost', 'active.json');
+    fs.writeFileSync(active, JSON.stringify({ files: { 'app.ts': { existed: true } } }));
+    const app = tree.getChildren().find((n) => label(n) === 'app.ts');
+    assert.strictEqual(tree.getTreeItem(app).description, 'Claude writing…');
+    fs.rmSync(active);
+
+    fs.rmSync(path.join(ws, 'src'), { recursive: true, force: true });
+    fs.rmSync(path.join(ws, '.ghost', 'files', 'src'), { recursive: true, force: true });
+    assert.deepStrictEqual(tree.getChildren().map(label), ['app.ts', 'quote.ts']);
+  });
+
   await test('focus mode: other autocomplete off in the draft file, restored when you leave', async () => {
     const cfg = () => vscode.workspace.getConfiguration();
     const g = () => cfg().inspect('editor.quickSuggestions').globalValue;
@@ -217,14 +254,25 @@ exports.run = async () => {
     await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
   });
 
-  await test('accepting the ghost gets undone', async () => {
+  await test('opening a draft file puts the cursor where typing starts', async () => {
+    const jfile = path.join(ws, 'jump.ts');
+    fs.writeFileSync(jfile, 'const a = 1;\nconst b = 2;\n');
+    fs.writeFileSync(core.ghostFile(ws, 'jump.ts'), 'const a = 1;\nconst b = 2;\nconst c = 3;\n');
+    const doc = await vscode.workspace.openTextDocument(jfile);
+    const editor = await vscode.window.showTextDocument(doc);
+    const at = () => `${editor.selection.active.line}:${editor.selection.active.character}`;
+    assert.ok(await waitFor(() => at() === '2:0'), `cursor at ${at()}`);
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+    fs.rmSync(core.ghostFile(ws, 'jump.ts'));
+  });
+
+  await test('ghost shows by itself where the cursor lands (no typing); accepting it gets undone', async () => {
     const doc = await vscode.workspace.openTextDocument(file);
     const editor = await vscode.window.showTextDocument(doc);
     const before = doc.getText();
     const pos = doc.lineAt(1).range.end;
     editor.selection = new vscode.Selection(pos, pos);
-    await vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
-    await sleep(800);
+    await sleep(800); // nothing typed, nothing triggered by hand
     await vscode.commands.executeCommand('editor.action.inlineSuggest.commit');
     await sleep(800);
     assert.strictEqual(api.stats.rejected, 1, 'ghost text was really shown and accepted, then caught');

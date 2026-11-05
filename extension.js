@@ -91,17 +91,18 @@ function readGhost(gp) {
   return entry;
 }
 
-// Draft info for a document, or null if it has none.
-function ghostFor(doc) {
-  if (doc.uri.scheme !== 'file') return null;
-  const root = core.ghostRootFor(doc.uri.fsPath);
+// Draft info for a file, or null if it has none.
+function ghostForUri(uri) {
+  if (uri.scheme !== 'file') return null;
+  const root = core.ghostRootFor(uri.fsPath);
   if (!root) return null;
-  const rel = core.relOf(root, doc.uri.fsPath);
+  const rel = core.relOf(root, uri.fsPath);
   if (!rel) return null;
   const gp = core.ghostFile(root, rel);
   const g = readGhost(gp);
   return g && { root, rel, gp, ...g };
 }
+const ghostFor = (doc) => ghostForUri(doc.uri);
 
 // Right after a Claude turn the buffer may still show Claude's code until VS Code reloads
 // the restored file. Rendering then would mark the draft as "fully typed" and delete it.
@@ -303,6 +304,160 @@ const fileBadges = {
   },
 };
 
+// ---- Ghost Code view: only the files with a draft (or that Claude is writing), in their folders ----
+
+const openDoc = (fsPath) => vscode.workspace.textDocuments.find((d) => d.uri.scheme === 'file' && samePath(d.uri.fsPath, fsPath));
+
+// Progress of one draft, cached until the draft, the file on disk or its open buffer changes.
+const progressCache = new Map(); // file path -> { key, p }
+function draftProgress(root, rel, fsPath) {
+  const g = readGhost(core.ghostFile(root, rel));
+  if (!g) return null;
+  const doc = openDoc(fsPath);
+  let key = `${g.mtimeMs}:`;
+  if (doc) key += `v${doc.version}`;
+  else {
+    try {
+      key += `m${fs.statSync(fsPath).mtimeMs}`;
+    } catch {
+      key += 'gone';
+    }
+  }
+  const hit = progressCache.get(fsPath);
+  if (hit && hit.key === key) return hit.p;
+  let text = '';
+  try {
+    text = doc ? doc.getText() : fs.readFileSync(fsPath, 'utf8');
+  } catch {}
+  const p = core.progress(core.splitLines(text), g.lines);
+  progressCache.set(fsPath, { key, p });
+  return p;
+}
+
+// Every file to show: { fsPath, root, rel, writing, p }.
+function changedFiles() {
+  const out = new Map();
+  for (const root of roots()) {
+    const act = core.readActive(root);
+    const writing = new Set(act ? Object.keys(act.files) : []);
+    for (const rel of new Set([...core.listGhosts(root), ...writing])) {
+      const fsPath = path.join(root, ...rel.split('/'));
+      if (out.has(fsPath)) continue;
+      if (writing.has(rel)) {
+        out.set(fsPath, { fsPath, root, rel, writing: true, p: null });
+        continue;
+      }
+      const p = draftProgress(root, rel, fsPath);
+      if (p && !p.done) out.set(fsPath, { fsPath, root, rel, writing: false, p });
+    }
+  }
+  return [...out.values()];
+}
+
+// The folder tree above those files, from each workspace folder down (sub-repos are just folders
+// in it, like in the Explorer). Several workspace folders: one top node each.
+function buildTree(files) {
+  const folders = vscode.workspace.workspaceFolders || [];
+  const top = { kind: 'folder', children: new Map() };
+  const multi = folders.length > 1;
+  const key = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  for (const f of files) {
+    const wf = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(f.fsPath));
+    const base = wf ? wf.uri.fsPath : f.root;
+    let node = top;
+    if (multi || !wf) {
+      const name = wf ? wf.name : path.basename(f.root);
+      if (!node.children.has(key(base))) node.children.set(key(base), { kind: 'folder', name, fsPath: base, children: new Map(), isRoot: true });
+      node = node.children.get(key(base));
+    }
+    const parts = path.relative(base, f.fsPath).split(path.sep);
+    let dir = base;
+    for (const part of parts.slice(0, -1)) {
+      dir = path.join(dir, part);
+      if (!node.children.has(key(dir))) node.children.set(key(dir), { kind: 'folder', name: part, fsPath: dir, children: new Map() });
+      node = node.children.get(key(dir));
+    }
+    node.children.set(key(f.fsPath), { kind: 'file', ...f });
+  }
+  const compact = vscode.workspace.getConfiguration('explorer').get('compactFolders', true);
+  const finish = (node) => {
+    let kids = [...node.children.values()];
+    if (compact) {
+      kids = kids.map((k) => {
+        // a/b/c in one row while each folder holds just one folder, like the Explorer
+        while (k.kind === 'folder' && !k.isRoot && k.children.size === 1) {
+          const only = [...k.children.values()][0];
+          if (only.kind !== 'folder') break;
+          k = { ...only, name: `${k.name}/${only.name}` };
+        }
+        return k;
+      });
+    }
+    kids.sort((a, b) => (a.kind !== b.kind ? (a.kind === 'folder' ? -1 : 1) : nameOf(a).localeCompare(nameOf(b), undefined, { sensitivity: 'base', numeric: true })));
+    for (const k of kids) if (k.kind === 'folder') k.list = finish(k);
+    return kids;
+  };
+  return finish(top);
+}
+
+const nameOf = (n) => n.name || path.basename(n.fsPath);
+
+const treeChanged = new vscode.EventEmitter();
+const ghostTree = {
+  onDidChangeTreeData: treeChanged.event,
+  getChildren(node) {
+    return node ? node.list : buildTree(changedFiles());
+  },
+  getTreeItem(node) {
+    const uri = vscode.Uri.file(node.fsPath);
+    if (node.kind === 'folder') {
+      const item = new vscode.TreeItem(node.name, vscode.TreeItemCollapsibleState.Expanded);
+      item.id = `d:${node.fsPath}`;
+      item.resourceUri = uri; // folder icon from the icon theme + the count badge
+      item.iconPath = vscode.ThemeIcon.Folder;
+      item.tooltip = node.fsPath;
+      item.contextValue = 'ghostFolder';
+      return item;
+    }
+    const item = new vscode.TreeItem(uri, vscode.TreeItemCollapsibleState.None);
+    item.id = `f:${node.fsPath}`;
+    item.command = { command: 'vscode.open', title: 'Open', arguments: [uri] };
+    if (node.writing) {
+      item.description = 'Claude writing…';
+      item.tooltip = `✍ ${node.rel}: Claude is writing it right now. Don't type until it finishes.`;
+      item.contextValue = 'ghostWriting';
+    } else {
+      item.description = `${node.p.pending} left`;
+      item.tooltip = `👻 ${node.rel}: ${node.p.pending} of ${node.p.total} draft lines left to type`;
+      item.contextValue = 'ghostFile';
+    }
+    return item;
+  },
+};
+
+let ghostView;
+let treeTimer;
+let treeDirty = false;
+// Count on the tab icon right away; the tree itself only rebuilds while you can see it.
+function refreshTree() {
+  clearTimeout(treeTimer);
+  treeTimer = setTimeout(() => {
+    if (!ghostView) return;
+    const n = roots().reduce((acc, r) => acc + core.listGhosts(r).length, 0);
+    ghostView.badge = n ? { value: n, tooltip: `👻 ${n} file(s) to type` } : undefined;
+    if (ghostView.visible) treeChanged.fire();
+    else treeDirty = true;
+  }, 250);
+}
+
+// From a tree row, a Uri, or else the active editor.
+function targetUri(arg) {
+  if (arg instanceof vscode.Uri) return arg;
+  if (arg && typeof arg.fsPath === 'string') return vscode.Uri.file(arg.fsPath);
+  const editor = vscode.window.activeTextEditor;
+  return editor && editor.document.uri;
+}
+
 // ---- focus mode: in a draft file the ghost is the only autocomplete ----
 // IntelliSense popups and AI inline suggestions fight the ghost for the cursor (and for Enter/Tab).
 // While a draft file is active they're switched off in user settings; leaving restores the exact
@@ -408,14 +563,80 @@ function announceDecorations() {
 }
 
 const stats = { rejected: 0 };
-// The inline ghost shows when VS Code triggers inline suggestions itself, i.e. while you type.
-// We never trigger them by command: a manual trigger also wakes Copilot and friends, which focus
-// mode keeps quiet. So: typing = inline ghost; just moving the cursor = decorations on that line.
+// The draft at the cursor is real (multi-line) ghost text from the inline provider. VS Code only
+// asks inline providers by itself while you type, so whenever the cursor comes to rest where typing
+// continues (file opened, a click, Ctrl+Alt+G, a fresh draft) we ask for ours: the code to type is on
+// screen before you type a thing. Only ours: since VS Code 1.106 the trigger takes a providerId, so
+// Copilot and friends (kept quiet by focus mode) are not woken. Older VS Code: the ghost at the cursor
+// shows once you start typing; until then the cursor line gets the decorations.
 let inlineShowing = false;
 let lastEdit = 0;
+const typedJustNow = () => Date.now() - lastEdit < 150;
 function onSelection(e) {
-  if (Date.now() - lastEdit > 150) inlineShowing = false; // moved, not typed: VS Code hid it
+  if (!typedJustNow()) inlineShowing = false; // moved, not typed: VS Code hid it
   scheduleRender();
+}
+
+function onActiveEditor() {
+  inlineShowing = false; // another file: VS Code dropped whatever it showed
+  scheduleRender();
+}
+
+function atLeast(version, min) {
+  const a = version.split(/[.-]/).map(Number);
+  const b = min.split('.').map(Number);
+  for (let i = 0; i < b.length; i++) if ((a[i] || 0) !== b[i]) return (a[i] || 0) > b[i];
+  return true;
+}
+const canShowOurs = atLeast(vscode.version, '1.106.0');
+
+let shownAt = null; // where we last asked for the ghost: document, version, draft, cursor
+function showGhostHere() {
+  const editor = vscode.window.activeTextEditor;
+  if (!canShowOurs || !editor || typedJustNow()) return; // typing: VS Code asks by itself
+  if (editor.selections.length !== 1 || !editor.selection.isEmpty) return;
+  const doc = editor.document;
+  const g = ghostFor(doc);
+  if (!g || core.isActive(g.root) || isStale(doc)) return;
+  if (!cursorGhost(editor, core.splitLines(doc.getText()), g)) return;
+  const pos = editor.selection.active;
+  const at = `${doc.uri}|${doc.version}|${g.mtimeMs}|${pos.line}:${pos.character}`;
+  if (inlineShowing && shownAt === at) return; // up already, or you dismissed it with Esc
+  shownAt = at;
+  inlineShowing = true;
+  vscode.commands
+    .executeCommand('editor.action.inlineSuggest.trigger', { providerId: `${ctx.extension.id}:*`, explicit: false })
+    .then(undefined, (err) => log.info(`showing the ghost failed: ${err && err.message}`));
+}
+
+// Cursor stop per ghost part, on its first line: where typing continues (its ghost shows there),
+// else the end of that line.
+function ghostStops(doc) {
+  const { g, user, ops, parts } = partsOf(doc);
+  if (!g) return [];
+  const lines = [...new Set(parts.map((p) => p.start))].sort((a, b) => a - b);
+  return lines.map((l) => new vscode.Position(l, core.ghostCol(user, g.lines, l, ops) ?? user[l].length));
+}
+
+function goTo(editor, pos) {
+  editor.selection = new vscode.Selection(pos, pos);
+  editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+}
+
+// Opening a draft file puts the cursor where typing starts, so the ghost shows right away. Once per
+// opened file, and only from the very top (anywhere else is where you left off).
+const jumped = new Set();
+function jumpToFirstGhost() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || !vscode.workspace.getConfiguration('vibeGhost').get('jumpToGhost', true)) return;
+  const key = editor.document.uri.toString();
+  if (jumped.has(key)) return;
+  const [first] = ghostStops(editor.document);
+  if (!first) return;
+  jumped.add(key);
+  const pos = editor.selection.active;
+  if (pos.line || pos.character || first.isEqual(pos)) return;
+  goTo(editor, first);
 }
 
 function updateContext() {
@@ -437,12 +658,15 @@ let timer;
 function scheduleRender() {
   clearTimeout(timer);
   timer = setTimeout(() => {
+    jumpToFirstGhost();
+    showGhostHere(); // before rendering: the cursor line then leaves the ghost to the inline provider
     for (const e of vscode.window.visibleTextEditors) render(e);
     refreshStatus();
     updateContext();
     lensChanged.fire();
     announceDecorations();
     updateFocus();
+    refreshTree();
   }, 60);
 }
 
@@ -492,9 +716,10 @@ async function setEnabled(root, on) {
 // Ghost parts of a document that's ready to show ghosts, else [].
 function partsOf(doc) {
   const g = ghostFor(doc);
-  if (!g || core.isActive(g.root) || isStale(doc)) return { g: null, user: [], parts: [] };
+  if (!g || core.isActive(g.root) || isStale(doc)) return { g: null, user: [], ops: [], parts: [] };
   const user = core.splitLines(doc.getText());
-  return { g, user, parts: core.hunks(user, g.lines) };
+  const ops = core.align(user, g.lines);
+  return { g, user, ops, parts: core.hunks(user, g.lines, ops) };
 }
 
 const threadLine = (part) => Math.max(part.lens - 1, 0);
@@ -693,17 +918,18 @@ async function pickRoot() {
 const pickFolder = () => pickFrom((vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath), 'Which folder?');
 
 const commands = {
-  async showDraft() {
-    const editor = vscode.window.activeTextEditor;
-    const g = editor && ghostFor(editor.document);
+  // From the palette (active editor) or a row of the Ghost Code view.
+  async showDraft(arg) {
+    const uri = targetUri(arg);
+    const g = uri && ghostForUri(uri);
     if (!g) return vscode.window.showInformationMessage('No Claude draft for this file.');
     const left = vscode.Uri.from({ scheme: SCHEME, path: '/' + g.rel, query: g.gp });
-    await vscode.commands.executeCommand('vscode.diff', left, editor.document.uri, `${path.basename(g.rel)}: Claude draft ↔ yours`);
+    await vscode.commands.executeCommand('vscode.diff', left, uri, `${path.basename(g.rel)}: Claude draft ↔ yours`);
   },
 
-  async discard() {
-    const editor = vscode.window.activeTextEditor;
-    const g = editor && ghostFor(editor.document);
+  async discard(arg) {
+    const uri = targetUri(arg);
+    const g = uri && ghostForUri(uri);
     if (!g) return;
     const ok = await vscode.window.showWarningMessage(`Throw away Claude's draft of ${g.rel}?`, { modal: true }, 'Discard');
     if (ok !== 'Discard') return;
@@ -873,16 +1099,14 @@ const commands = {
     if (thread) thread.dispose();
   },
 
+  // The ghost of the part it lands on shows right away (showGhostHere).
   nextGhost() {
     const editor = vscode.window.activeTextEditor;
     if (!editor) return;
-    const lines = partsOf(editor.document).parts.map((p) => p.start);
-    if (!lines.length) return;
+    const stops = ghostStops(editor.document);
+    if (!stops.length) return;
     const cur = editor.selection.active.line;
-    const line = lines.find((l) => l > cur) ?? lines[0];
-    const pos = editor.document.lineAt(line).range.end;
-    editor.selection = new vscode.Selection(pos, pos);
-    editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    goTo(editor, stops.find((p) => p.line > cur) ?? stops[0]);
   },
 };
 
@@ -897,6 +1121,7 @@ function activate(context) {
     provideCommentingRanges: (doc) =>
       partsOf(doc).parts.map((p) => new vscode.Range(threadLine(p), 0, Math.max(p.end, p.lens), 0)),
   };
+  ghostView = vscode.window.createTreeView('vibeGhost.files', { treeDataProvider: ghostTree, showCollapseAll: true });
 
   context.subscriptions.push(
     statusItem,
@@ -915,11 +1140,21 @@ function activate(context) {
     }),
     vscode.workspace.onDidChangeTextDocument(onChange),
     vscode.window.onDidChangeVisibleTextEditors(scheduleRender),
-    vscode.window.onDidChangeActiveTextEditor(scheduleRender),
+    vscode.window.onDidChangeActiveTextEditor(onActiveEditor),
     vscode.window.onDidChangeTextEditorSelection(onSelection),
+    vscode.workspace.onDidCloseTextDocument((doc) => jumped.delete(doc.uri.toString())),
     vscode.languages.registerInlineCompletionItemProvider({ scheme: 'file' }, inlineGhost),
     vscode.window.registerFileDecorationProvider(fileBadges),
     fileDecoChanged,
+    ghostView,
+    ghostView.onDidChangeVisibility((e) => {
+      if (e.visible && treeDirty) {
+        treeDirty = false;
+        treeChanged.fire();
+      }
+    }),
+    treeChanged,
+    vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration('explorer.compactFolders') && refreshTree()),
     ...Object.entries(commands).map(([name, fn]) => vscode.commands.registerCommand(`vibeGhost.${name}`, fn))
   );
 
@@ -961,7 +1196,7 @@ function activate(context) {
   );
 
   scheduleRender();
-  return { inlineGhost, fileBadges, announceDecorations, stats, settleFocus: runFocus }; // for the VS Code integration test
+  return { inlineGhost, fileBadges, ghostTree, announceDecorations, stats, settleFocus: runFocus }; // for the VS Code integration test
 }
 
 // Window closing: give the user their autocomplete back.
