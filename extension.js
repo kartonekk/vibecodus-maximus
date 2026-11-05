@@ -108,8 +108,10 @@ const ghostFor = (doc) => ghostForUri(doc.uri);
 // the restored file. Rendering then would mark the draft as "fully typed" and delete it.
 function isStale(doc) {
   if (doc.isDirty) return false;
+  // Line endings don't count: VS Code evens out a file's mixed CRLF/LF in the editor.
+  const norm = (t) => t.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
   try {
-    return fs.readFileSync(doc.uri.fsPath, 'utf8').replace(/^﻿/, '') !== doc.getText();
+    return norm(fs.readFileSync(doc.uri.fsPath, 'utf8')) !== norm(doc.getText());
   } catch {
     return false;
   }
@@ -146,20 +148,26 @@ function render(editor) {
   const tabSize = Number(editor.options.tabSize) || 4;
   const user = core.splitLines(doc.getText());
   const ops = core.align(user, g.lines);
+  if (expandDraft(editor, user, g, ops)) return; // the buffer is about to change: render after that
   const out = { suffix: [], insert: [], mismatch: [], extra: [] };
   const lang = doc.languageId;
   // The cursor line gets real (multi-line) ghost text from the inline provider instead.
   const skipLine = inlineShowing && cursorGhost(editor, user, g, ops) ? editor.selection.active.line : -1;
+  const cursorLines = new Set(editor.selections.map((s) => s.active.line));
 
   for (const op of ops) {
     if ((op.t === 'pair' && op.u === skipLine) || (op.t === 'ins' && op.at === skipLine)) continue;
     if (op.t === 'pair') {
       const u = user[op.u];
       const want = g.lines[op.g];
-      const d = core.lineDiff(u, want);
+      let d = core.lineDiff(u, want);
+      // Whole line typed plus closers the editor auto-inserted: fine while you're on it (Enter
+      // moves them down), a stray bracket once you've left it.
+      if (d.auto && !d.text && !cursorLines.has(op.u)) d = { kind: 'mismatch', col: d.at };
       if (d.kind === 'suffix') {
         // the gap before an auto-closed quote/bracket (plus any after it), or the end
         for (const part of [d, ...(d.more || [])]) {
+          if (!part.text) continue;
           const end = new vscode.Position(op.u, part.at);
           out.suffix.push({
             range: new vscode.Range(end, end),
@@ -197,6 +205,92 @@ function render(editor) {
 
   const p = core.progress(user, g.lines, ops);
   if (p.done) finish(g);
+}
+
+// ---- every draft line on a line of its own ----
+// VS Code can't put ghost lines between real ones (extensions get no virtual lines), so a block of
+// new draft lines would only fit into a "+N lines" marker. Instead the buffer gets an empty line for
+// every draft line not started yet, each showing its ghost in place; Enter just opens the next one
+// (the leftover empty line goes). Only empty lines and indentation are ever touched. Right after a
+// save the file stays as the save left it (trim/format on save) until you type again, and it's never
+// more than a few rounds without you typing, so nothing can fight over the buffer.
+const expandOn = () => vscode.workspace.getConfiguration('vibeGhost').get('expandDrafts', true);
+const expandBusy = new Set(); // documents with our edit in flight
+const expandRounds = new Map(); // document -> { mtime (of the draft), n: our edits since you typed }
+const savedAt = new Map(); // document -> `${version}|${draft mtime}` right after a save
+const typedAt = new Map(); // document -> its version right after you typed in it (in the active editor)
+let layoutEdit = false; // our own edit: not typing, not a paste
+
+function expandDraft(editor, user, g, ops) {
+  const doc = editor.document;
+  const id = doc.uri.toString();
+  if (!expandOn() || expandBusy.has(id) || savedAt.get(id) === `${doc.version}|${g.mtimeMs}`) return false;
+  const rounds = expandRounds.get(id);
+  const n = rounds && rounds.mtime === g.mtimeMs ? rounds.n : 0;
+  if (n >= 3) return false;
+  const keep = new Set(editor.selections.map((s) => s.active.line));
+  const typing = typedAt.get(id) === doc.version; // nothing changed since you typed: the cursor line is yours
+  const edits = core.layout(user, g.lines, { keep, typed: typing ? keep : new Set() }, ops);
+  if (!edits.length) return false;
+  expandRounds.set(id, { mtime: g.mtimeMs, n: n + 1 });
+  expandBusy.add(id);
+  applyLayout(editor, edits)
+    .catch((err) => log.info(`laying out ${doc.uri.fsPath} failed: ${err && err.message}`))
+    .finally(() => {
+      expandBusy.delete(id);
+      scheduleRender();
+    });
+  return true;
+}
+
+// Ranges deleting whole lines (sorted line numbers), runs merged; at the end of the document the
+// line break before the run goes with it.
+function lineDeletes(doc, lines) {
+  const out = [];
+  const last = doc.lineCount - 1;
+  for (let i = 0; i < lines.length; ) {
+    let j = i;
+    while (j + 1 < lines.length && lines[j + 1] === lines[j] + 1) j++;
+    const [s, e] = [lines[i], lines[j]];
+    if (e < last) out.push(new vscode.Range(s, 0, e + 1, 0));
+    else if (s > 0) out.push(new vscode.Range(doc.lineAt(s - 1).range.end, doc.lineAt(e).range.end));
+    i = j + 1;
+  }
+  return out;
+}
+
+async function applyLayout(editor, edits) {
+  const doc = editor.document;
+  const eol = doc.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+  const last = doc.lineCount - 1;
+  let appended = 0;
+  layoutEdit = true;
+  try {
+    await editor.edit(
+      (b) => {
+        for (const e of edits) {
+          if (e.t === 'insert' && e.before <= last) b.insert(new vscode.Position(e.before, 0), eol.repeat(e.count));
+          else if (e.t === 'insert') {
+            b.insert(doc.lineAt(last).range.end, eol.repeat(e.count));
+            appended += e.count;
+          } else if (e.t === 'indent') b.insert(new vscode.Position(e.line, 0), e.text);
+        }
+        const gone = edits.filter((e) => e.t === 'delete').map((e) => e.line).sort((a, b) => a - b);
+        for (const r of lineDeletes(doc, gone)) b.delete(r);
+      },
+      { undoStopBefore: false, undoStopAfter: false } // undoing your last step takes ours along
+    );
+  } finally {
+    layoutEdit = false;
+  }
+  // Lines added at the very end may have pushed a cursor sitting there down with them.
+  if (appended) {
+    const was = doc.lineAt(doc.lineCount - 1 - appended).range.end;
+    const end = doc.lineAt(doc.lineCount - 1).range.end;
+    if (editor.selections.some((s) => s.active.isEqual(end))) {
+      editor.selections = editor.selections.map((s) => (s.active.isEqual(end) ? new vscode.Selection(was, was) : s));
+    }
+  }
 }
 
 function md(lang, lines, title) {
@@ -870,10 +964,13 @@ function refreshStatus() {
 // Paste guard: a big chunk that comes straight out of the draft gets undone.
 let ownEdit = false; // our own Tab-completed comment line
 function onChange(e) {
+  if (layoutEdit) return scheduleRender(); // our empty lines: not typing, not a paste
+  if (e.contentChanges.length) expandRounds.delete(e.document.uri.toString());
   const active = vscode.window.activeTextEditor;
   if (active && active.document === e.document) {
     lastEdit = Date.now();
     inlineShowing = true;
+    if (e.contentChanges.length) typedAt.set(e.document.uri.toString(), e.document.version);
   }
   scheduleRender();
   const cfg = vscode.workspace.getConfiguration('vibeGhost');
@@ -935,6 +1032,20 @@ const commands = {
     if (ok !== 'Discard') return;
     fs.rmSync(g.gp, { force: true });
     cache.delete(g.gp);
+    // The empty lines still waiting for the draft's lines go with it.
+    const doc = openDoc(uri.fsPath);
+    if (doc && expandOn()) {
+      const user = core.splitLines(doc.getText());
+      const waiting = core
+        .align(user, g.lines)
+        .filter((op) => op.t === 'pair' && user[op.u] === '' && g.lines[op.g].trim())
+        .map((op) => op.u);
+      if (waiting.length) {
+        const edit = new vscode.WorkspaceEdit();
+        for (const r of lineDeletes(doc, waiting)) edit.delete(doc.uri, r);
+        await vscode.workspace.applyEdit(edit);
+      }
+    }
     scheduleRender();
   },
 
@@ -1142,7 +1253,17 @@ function activate(context) {
     vscode.window.onDidChangeVisibleTextEditors(scheduleRender),
     vscode.window.onDidChangeActiveTextEditor(onActiveEditor),
     vscode.window.onDidChangeTextEditorSelection(onSelection),
-    vscode.workspace.onDidCloseTextDocument((doc) => jumped.delete(doc.uri.toString())),
+    vscode.workspace.onDidCloseTextDocument((doc) => {
+      const id = doc.uri.toString();
+      jumped.delete(id);
+      savedAt.delete(id);
+      typedAt.delete(id);
+      expandRounds.delete(id);
+    }),
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      const g = ghostFor(doc);
+      if (g) savedAt.set(doc.uri.toString(), `${doc.version}|${g.mtimeMs}`);
+    }),
     vscode.languages.registerInlineCompletionItemProvider({ scheme: 'file' }, inlineGhost),
     vscode.window.registerFileDecorationProvider(fileBadges),
     fileDecoChanged,

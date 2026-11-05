@@ -105,6 +105,123 @@ test('auto-closed bracket mid-line: ghost inside and after it', () => {
   assert.strictEqual(core.lineDiff('if (x)', draft).kind, 'mismatch');
 });
 
+test('closers auto-inserted for a bracket the draft closes on a later line: not a typo', () => {
+  assert.deepStrictEqual(core.lineDiff('foo()', 'foo('), { kind: 'suffix', text: '', at: 4, auto: true });
+  assert.deepStrictEqual(core.lineDiff('  if (ok) {}', '  if (ok) {'), { kind: 'suffix', text: '', at: 11, auto: true });
+  assert.deepStrictEqual(core.lineDiff('run({})', 'run({'), { kind: 'suffix', text: '', at: 5, auto: true });
+  assert.deepStrictEqual(core.lineDiff('const s = `mu`', 'const s = `multi'), { kind: 'suffix', text: 'lti', at: 13, auto: true });
+  assert.deepStrictEqual(core.lineDiff('foo()', 'foo(a, {'), { kind: 'suffix', text: 'a, {', at: 4, auto: true });
+  // a wrong closer is still a typo
+  assert.strictEqual(core.lineDiff('foo(a]', 'foo(a)').kind, 'mismatch');
+  assert.strictEqual(core.lineDiff('foo(a))', 'foo(a').kind, 'mismatch', 'one closer too many');
+  assert.strictEqual(core.autoClosers('f({ a: "x'), '"})');
+  assert.strictEqual(core.autoClosers('s = "(" + ['), ']', 'brackets inside a string do not count');
+});
+
+test('closer line left by Enter between brackets pairs with the draft line it starts', () => {
+  const draft = ['x = [', '  1,', '  2,', '],', 'y'];
+  const user = ['x = [', '  1,', '  ', ']', 'y'];
+  const ops = core.align(user, draft);
+  assert.deepStrictEqual(ops.filter((o) => o.t !== 'eq'), [{ t: 'pair', u: 2, g: 2 }, { t: 'pair', u: 3, g: 3 }]);
+  assert.deepStrictEqual(core.lineDiff(']', '],'), { kind: 'suffix', text: ',', at: 1 });
+});
+
+test('layout: an empty line for every draft line not started, leftovers go, typed lines get indented', () => {
+  const draft = ['a {', '  b', '  c', '}'];
+  assert.deepStrictEqual(core.layout(['a {', '}'], draft), [{ t: 'insert', before: 1, count: 2 }]);
+  assert.deepStrictEqual(core.layout([''], ['x', 'y']), [{ t: 'insert', before: 1, count: 1 }], 'empty file: lines at the end');
+  // Enter at the end of `  b` opened a fresh line above the empty one waiting for `  c`
+  assert.deepStrictEqual(core.layout(['a {', '  b', '  ', '', '}'], draft, { keep: new Set([2]) }), [{ t: 'delete', line: 3 }]);
+  assert.deepStrictEqual(core.layout(['a {', '  b', '  ', '', '}'], draft, { keep: new Set([3]) }), [], 'the leftover is where the cursor is: later');
+  // typing on an empty line at column 0: the draft's indentation, once
+  assert.deepStrictEqual(core.layout(['a {', '  b', 'c', '}'], draft, { typed: new Set([2]) }), [{ t: 'indent', line: 2, text: '  ' }]);
+  assert.deepStrictEqual(core.layout(['a {', '  b', 'x', '}'], draft, { typed: new Set([2]) }), [], 'typo: hands off');
+  assert.deepStrictEqual(core.layout(['a {', '  b', '  c', '}'], draft), [], 'laid out: nothing to do');
+  // non-empty lines the draft doesn't have are yours to delete
+  assert.deepStrictEqual(core.layout(['a {', '  b', '  c', 'zzz', '}'], draft), []);
+});
+
+// Types a draft the way VS Code does it: brackets and quotes auto-close and get typed over, Enter
+// between brackets moves the closer down, the extension lays the buffer out after every key.
+function typeDraft(draft, { expand, down }) {
+  const OPEN = { '(': ')', '[': ']', '{': '}' };
+  const BEFORE = new Set([';', ':', '.', ',', '=', '}', ']', ')', ' ', undefined]);
+  const g = core.splitLines(draft);
+  const lines = [''];
+  let r = 0;
+  let c = 0;
+  const reds = [];
+  let markers = 0;
+  const settle = (what) => {
+    for (let pass = 0; expand && pass < 3; pass++) {
+      const edits = core.layout(lines, g, { keep: new Set([r]), typed: new Set([r]) });
+      if (!edits.length) break;
+      assert.ok(pass < 2, 'layout settles');
+      for (const e of [...edits].sort((a, b) => (b.before ?? b.line) - (a.before ?? a.line))) {
+        if (e.t === 'insert') {
+          lines.splice(e.before, 0, ...Array(e.count).fill(''));
+          if (e.before <= r) r += e.count;
+        } else if (e.t === 'delete') {
+          lines.splice(e.line, 1);
+          if (e.line < r) r--;
+        } else {
+          lines[e.line] = e.text + lines[e.line];
+          if (e.line === r) c += e.text.length;
+        }
+      }
+    }
+    for (const op of core.align(lines, g)) {
+      if (op.t === 'pair' && core.lineDiff(lines[op.u], g[op.g]).kind === 'mismatch') reds.push(`${what}: ${JSON.stringify(lines[op.u])} vs ${JSON.stringify(g[op.g])}`);
+      if (op.t === 'ins' && g.slice(op.from, op.to).some((l) => l.trim())) markers++;
+    }
+  };
+  const type = (ch) => {
+    const cur = lines[r];
+    const inStr = (cur.slice(0, c).match(/"/g) || []).length % 2 === 1;
+    if (')]}"\'`'.includes(ch) && cur[c] === ch) c++;
+    else if (OPEN[ch] && BEFORE.has(cur[c])) lines[r] = cur.slice(0, c) + ch + OPEN[ch] + cur.slice(c++);
+    else if ('"\'`'.includes(ch) && !inStr && BEFORE.has(cur[c]) && !/\w/.test(cur[c - 1] || '')) lines[r] = cur.slice(0, c) + ch + ch + cur.slice(c++);
+    else lines[r] = cur.slice(0, c) + ch + cur.slice(c++);
+    settle(`'${ch}' in ${JSON.stringify(lines[r])}`);
+  };
+  settle('open');
+  g.forEach((line, i) => {
+    const want = line.trim();
+    if (i > 0) {
+      const next = lines[r + 1];
+      // arrow down onto the line already waiting there (an empty one, or the closer Enter moved down)
+      if (next !== undefined && c === lines[r].length && (next.trim() ? want.startsWith(next.trim()) : down)) {
+        r++;
+        c = lines[r].length;
+        for (const ch of want.slice(lines[r].trim().length)) type(ch);
+        return;
+      }
+      const cur = lines[r];
+      const ind = cur.match(/^ */)[0] + (/[({[]$/.test(cur.slice(0, c)) ? '  ' : '');
+      if (OPEN[cur[c - 1]] && cur[c] === OPEN[cur[c - 1]]) lines.splice(r, 1, cur.slice(0, c), ind, cur.match(/^ */)[0] + cur.slice(c));
+      else lines.splice(r, 1, cur.slice(0, c), ind + cur.slice(c).trimStart());
+      r++;
+      c = ind.length;
+      settle('Enter');
+    }
+    for (const ch of want) type(ch);
+  });
+  return { reds, markers, lines, done: core.progress(lines, g).done };
+}
+
+test('typing a draft in an auto-closing editor never shows red; expanded: no markers, no stray lines', () => {
+  const draft = 'function add(a, b) {\n  return a + b;\n}\n\nconst config = {\n  name: "x",\n  list: [\n    1,\n  ],\n};\n\nfoo(\n  bar,\n);\nif (ok) {\n  run({ a: 1 });\n}\nconst s = `multi\nline`;\n';
+  for (const mode of [{ expand: false }, { expand: true }, { expand: true, down: true }]) {
+    const res = typeDraft(draft, mode);
+    assert.deepStrictEqual(res.reds, [], JSON.stringify(mode));
+    assert.ok(res.done, `${JSON.stringify(mode)}: fully typed`);
+    if (mode.expand) {
+      assert.strictEqual(res.markers, 0, 'never a +N marker');
+      assert.strictEqual(res.lines.join('\n'), draft.replace(/\n$/, '\n'), 'no stray empty lines, indentation as drafted');
+    }
+  }
+});
+
 test('ghostAt: rest of line + block below, typed over as you go', () => {
   // empty file: whole draft is ghost text at the cursor
   assert.strictEqual(core.ghostAt([''], ghost, 0, 0), ghost.join('\n'));
