@@ -23,9 +23,13 @@ async function test(name, fn) {
   console.log(`ok  ${name}`);
 }
 
+// Empty lines for new draft lines (vibeGhost.expandDrafts, on by default).
+const setExpand = (on) => vscode.workspace.getConfiguration('vibeGhost').update('expandDrafts', on, vscode.ConfigurationTarget.Global);
+
 exports.run = async () => {
   const ext = vscode.extensions.getExtension('karton.vibecodus-maximus');
   const api = await ext.activate();
+  await setExpand(false); // first the classic layout: a block of new lines stays a block (ghost at the cursor)
   const file = path.join(ws, 'app.ts');
   const mine = 'const x = 1;\nconst z = 3;\n';
   const draft = 'const x = 1;\nconst y = 2;\nconst w = 4;\nconst z = 3;\n';
@@ -81,6 +85,7 @@ exports.run = async () => {
     editor.selection = new vscode.Selection(pos, pos);
     const items = api.inlineGhost.provideInlineCompletionItems(doc, pos);
     assert.strictEqual(items[0].insertText, ' = 2;\nconst w = 4;');
+    await setExpand(true); // the default from here on
   });
 
   await test('auto-closed quote: ghost fills the gap and keeps the quote after it', async () => {
@@ -269,6 +274,7 @@ exports.run = async () => {
   await test('ghost shows by itself where the cursor lands (no typing); accepting it gets undone', async () => {
     const doc = await vscode.workspace.openTextDocument(file);
     const editor = await vscode.window.showTextDocument(doc);
+    await sleep(400); // the empty lines for new draft lines are in
     const before = doc.getText();
     const pos = doc.lineAt(1).range.end;
     editor.selection = new vscode.Selection(pos, pos);
@@ -277,6 +283,30 @@ exports.run = async () => {
     await sleep(800);
     assert.strictEqual(api.stats.rejected, 1, 'ghost text was really shown and accepted, then caught');
     assert.strictEqual(doc.getText(), before, 'accept was undone');
+  });
+
+  await test('expanded: every draft line on a line of its own, Enter moves on to the next', async () => {
+    const efile = path.join(ws, 'expand.ts');
+    fs.writeFileSync(efile, 'function f() {\n}\n');
+    fs.writeFileSync(core.ghostFile(ws, 'expand.ts'), 'function f() {\n  const a = 1;\n  return a;\n}\n');
+    const doc = await vscode.workspace.openTextDocument(efile);
+    const editor = await vscode.window.showTextDocument(doc);
+    const text = () => JSON.stringify(doc.getText());
+    assert.ok(await waitFor(() => doc.getText() === 'function f() {\n\n\n}\n'), `an empty line per new draft line: ${text()}`);
+    // typing on one at column 0: it gets the draft's indentation
+    editor.selection = new vscode.Selection(1, 0, 1, 0);
+    await vscode.commands.executeCommand('type', { text: 'const a = 1;' });
+    assert.ok(await waitFor(() => doc.lineAt(1).text === '  const a = 1;'), `indented like the draft: ${text()}`);
+    // Enter at its end: the fresh line takes over, no empty line piles up
+    await vscode.commands.executeCommand('type', { text: '\n' });
+    assert.ok(await waitFor(() => doc.lineCount === 5 && doc.lineAt(3).text === '}'), `one line per draft line: ${text()}`);
+    assert.strictEqual(editor.selection.active.line, 2, 'cursor on the next line to type');
+    // the last line: exactly the draft, nothing left over, draft retired
+    await vscode.commands.executeCommand('type', { text: 'return a;' });
+    assert.ok(await waitFor(() => !fs.existsSync(core.ghostFile(ws, 'expand.ts'))), `draft retired: ${text()}`);
+    assert.strictEqual(doc.getText(), 'function f() {\n  const a = 1;\n  return a;\n}\n');
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    fs.rmSync(core.ghostFile(ws, 'expand.ts'), { force: true });
   });
 
   await test('typing the whole draft clears the badge', async () => {

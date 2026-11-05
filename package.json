@@ -237,6 +237,11 @@
           "default": true,
           "description": "Show the draft as real ghost text at the cursor (the rest of the line plus the lines below), which you type over. It appears as soon as the cursor is where typing continues, no need to start typing first (VS Code 1.106+). Tab never accepts it."
         },
+        "vibeGhost.expandDrafts": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show every draft line in place, on a line of its own: new draft lines get an empty line each in your file (with the ghost on it) instead of a '👻 +N ↓' marker. Enter moves on to the next one. Only empty lines and indentation are touched."
+        },
         "vibeGhost.jumpToGhost": {
           "type": "boolean",
           "default": true,

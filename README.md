@@ -3,8 +3,8 @@
 Claude Code writes the code. You **type** it. Only what you type ever reaches git.
 
 Every edit Claude makes in the terminal becomes a *draft*. In VS Code the draft shows up as
-faded ghost text behind your code: the rest of the line you're on, `👻 +N ↓` markers where whole
-blocks are waiting, strike-through on lines Claude removed. Type it out and the ghost fades.
+faded ghost text behind your code: the rest of the line you're on, every new line in place on a
+line of its own, strike-through on lines Claude removed. Type it out and the ghost fades.
 When the file matches the draft, the draft disappears.
 
 ## Setup
@@ -77,14 +77,14 @@ turn how far you've got typing each draft.
 
 | | |
 |---|---|
-| ghost text at the cursor | the rest of the line **plus the new lines below it**, rendered in place like Copilot ghost text: just type over it. `Tab` indents and never accepts code (accepting any other way gets undone). **Exception:** when the line due is entirely a comment (`/** */` blocks, Python `"""`/`'''` docstrings, `//`, `#` where # is a comment) `Tab` fills in that one line. Off: `vibeGhost.tabCompletesComments`. It shows **as soon as the cursor is there**, nothing to type first: opening a draft file puts the cursor on the first line to type (`vibeGhost.jumpToGhost`), `Ctrl+Alt+G` jumps to the next one, and a click at the end of the line above a `👻 +N ↓` marker shows that whole block (VS Code 1.106+; older versions show it once you start typing) |
+| ghost text at the cursor | the rest of the line **plus the new lines below it**, rendered in place like Copilot ghost text: just type over it. `Tab` indents and never accepts code (accepting any other way gets undone). **Exception:** when the line due is entirely a comment (`/** */` blocks, Python `"""`/`'''` docstrings, `//`, `#` where # is a comment) `Tab` fills in that one line. Off: `vibeGhost.tabCompletesComments`. It shows **as soon as the cursor is there**, nothing to type first: opening a draft file puts the cursor on the first line to type (`vibeGhost.jumpToGhost`), `Ctrl+Alt+G` jumps to the next one (VS Code 1.106+; older versions show it once you start typing) |
 | ghost text after other lines | rest of the line to type |
 | 👻 badge + purple name (Explorer, tabs) | file still has draft lines to type; hover shows how many. ✍ = Claude is writing it right now. Disappears when you finished typing |
 | status bar `· autocomplete off` | you are in a draft file, so IntelliSense popups and AI inline suggestions are paused and the ghost is the only autocomplete (`Ctrl+Space` still works). Leave the file and your settings come back exactly as they were. Turn off with `vibeGhost.quietOtherCompletions` |
 | number badge on folders | how many unfinished files are somewhere inside (repo folder, `apps/`, `components/`…), even while collapsed; hover lists them |
 | **Ghost Code** tab (👻 in the activity bar) | a file tree with **only** the files that still have a draft to type, inside their folders (single-folder chains collapse into one row, like `src/components`, following `explorer.compactFolders`). Each file shows how many lines are left; ✍ files Claude is writing right now. Click to open, the inline diff button shows the draft side by side, right-click to discard. The tab icon counts the files |
-| `👻 +3 ↓ code…` | 3 lines to type below (hover to see all); put the cursor at the end of that line (click or `Ctrl+Alt+G`) and all of them appear in place |
-| red background + `👻 expected` | you typed something different |
+| new lines, all expanded | every draft line Claude added gets an empty line of its own in your file with its ghost on it, so the whole draft is always laid out in place. `Enter` at the end of a line just moves on to the next one (no stray empty lines pile up), and a line you start at column 0 gets the draft's indentation. Only empty lines and indentation are touched; right after a save the file is left as saved until you type. Off: `vibeGhost.expandDrafts` (then blocks show as a `👻 +N ↓` marker) |
+| red background + `👻 expected` | you typed something different. Brackets/quotes the editor auto-closed don't count (`foo(|)` for `foo(`, `{|}` for `if (x) {`), unless you leave one behind on a finished line |
 | faded strike-through | line Claude's draft doesn't have |
 | `Ctrl+Alt+G` | jump to the next line to type; its ghost shows right away |
 | `Ghost: Show Claude draft side by side` | diff view |
