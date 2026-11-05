@@ -2,7 +2,7 @@
   "name": "vibecodus-maximus",
   "displayName": "Vibecodus Maximus: Ghost Code",
   "description": "Claude Code writes drafts as ghost text behind your code. You type them. Only what you type gets committed.",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "publisher": "karton",
   "license": "MIT",
   "icon": "patrick-star.png",
@@ -20,6 +20,30 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vibeGhost",
+          "title": "Ghost Code",
+          "icon": "media/ghost.svg"
+        }
+      ]
+    },
+    "views": {
+      "vibeGhost": [
+        {
+          "id": "vibeGhost.files",
+          "name": "Files to type",
+          "contextualTitle": "Ghost Code"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "vibeGhost.files",
+        "contents": "No drafts to type. 👻\nFiles Claude Code changes show up here, inside their folders, until you have typed them."
+      }
+    ],
     "colors": [
       {
         "id": "vibeGhost.pendingForeground",
@@ -46,7 +70,8 @@
       {
         "command": "vibeGhost.showDraft",
         "title": "Show Claude draft side by side",
-        "category": "Ghost"
+        "category": "Ghost",
+        "icon": "$(diff)"
       },
       {
         "command": "vibeGhost.nextGhost",
@@ -61,7 +86,8 @@
       {
         "command": "vibeGhost.discard",
         "title": "Discard Claude draft for this file",
-        "category": "Ghost"
+        "category": "Ghost",
+        "icon": "$(discard)"
       },
       {
         "command": "vibeGhost.toggle",
@@ -117,6 +143,23 @@
       }
     ],
     "menus": {
+      "view/item/context": [
+        {
+          "command": "vibeGhost.showDraft",
+          "group": "inline@1",
+          "when": "view == vibeGhost.files && viewItem == ghostFile"
+        },
+        {
+          "command": "vibeGhost.showDraft",
+          "group": "ghost@1",
+          "when": "view == vibeGhost.files && viewItem == ghostFile"
+        },
+        {
+          "command": "vibeGhost.discard",
+          "group": "ghost@2",
+          "when": "view == vibeGhost.files && viewItem == ghostFile"
+        }
+      ],
       "comments/commentThread/context": [
         {
           "command": "vibeGhost.ask",
@@ -192,7 +235,12 @@
         "vibeGhost.inlineGhost": {
           "type": "boolean",
           "default": true,
-          "description": "Show the draft as real ghost text at the cursor (the rest of the line plus the lines below), which you type over. Tab never accepts it."
+          "description": "Show the draft as real ghost text at the cursor (the rest of the line plus the lines below), which you type over. It appears as soon as the cursor is where typing continues, no need to start typing first (VS Code 1.106+). Tab never accepts it."
+        },
+        "vibeGhost.jumpToGhost": {
+          "type": "boolean",
+          "default": true,
+          "description": "When you open a file with a draft, put the cursor on the first line to type, so the code to type shows right away. Only when the cursor is still at the top of the file."
         },
         "vibeGhost.tabCompletesComments": {
           "type": "boolean",

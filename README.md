@@ -10,7 +10,7 @@ When the file matches the draft, the draft disappears.
 ## Setup
 
 ```bash
-code --install-extension vibecodus-maximus-0.15.0.vsix
+code --install-extension vibecodus-maximus-0.16.0.vsix
 ```
 
 That's it. Ghost mode is **on by default**: open any git repo in VS Code and the extension wires it up,
@@ -77,15 +77,16 @@ turn how far you've got typing each draft.
 
 | | |
 |---|---|
-| ghost text at the cursor | the rest of the line **plus the new lines below it**, rendered in place like Copilot ghost text: just type over it. `Tab` indents and never accepts code (accepting any other way gets undone). **Exception:** when the line due is entirely a comment (`/** */` blocks, Python `"""`/`'''` docstrings, `//`, `#` where # is a comment) `Tab` fills in that one line. Off: `vibeGhost.tabCompletesComments`. Put the cursor at the end of the line above a `👻 +N ↓` marker (or hit `Ctrl+Alt+G`) to see a block |
+| ghost text at the cursor | the rest of the line **plus the new lines below it**, rendered in place like Copilot ghost text: just type over it. `Tab` indents and never accepts code (accepting any other way gets undone). **Exception:** when the line due is entirely a comment (`/** */` blocks, Python `"""`/`'''` docstrings, `//`, `#` where # is a comment) `Tab` fills in that one line. Off: `vibeGhost.tabCompletesComments`. It shows **as soon as the cursor is there**, nothing to type first: opening a draft file puts the cursor on the first line to type (`vibeGhost.jumpToGhost`), `Ctrl+Alt+G` jumps to the next one, and a click at the end of the line above a `👻 +N ↓` marker shows that whole block (VS Code 1.106+; older versions show it once you start typing) |
 | ghost text after other lines | rest of the line to type |
 | 👻 badge + purple name (Explorer, tabs) | file still has draft lines to type; hover shows how many. ✍ = Claude is writing it right now. Disappears when you finished typing |
 | status bar `· autocomplete off` | you are in a draft file, so IntelliSense popups and AI inline suggestions are paused and the ghost is the only autocomplete (`Ctrl+Space` still works). Leave the file and your settings come back exactly as they were. Turn off with `vibeGhost.quietOtherCompletions` |
 | number badge on folders | how many unfinished files are somewhere inside (repo folder, `apps/`, `components/`…), even while collapsed; hover lists them |
-| `👻 +3 ↓ code…` | 3 lines to type below (hover to see all); press Enter at the end of the line and the next one appears in place |
+| **Ghost Code** tab (👻 in the activity bar) | a file tree with **only** the files that still have a draft to type, inside their folders (single-folder chains collapse into one row, like `src/components`, following `explorer.compactFolders`). Each file shows how many lines are left; ✍ files Claude is writing right now. Click to open, the inline diff button shows the draft side by side, right-click to discard. The tab icon counts the files |
+| `👻 +3 ↓ code…` | 3 lines to type below (hover to see all); put the cursor at the end of that line (click or `Ctrl+Alt+G`) and all of them appear in place |
 | red background + `👻 expected` | you typed something different |
 | faded strike-through | line Claude's draft doesn't have |
-| `Ctrl+Alt+G` | jump to the next line to type |
+| `Ctrl+Alt+G` | jump to the next line to type; its ghost shows right away |
 | `Ghost: Show Claude draft side by side` | diff view |
 | `Ghost: Discard Claude draft for this file` | reject it |
 | `Ghost: Toggle ghost mode on/off` | Claude edits files directly while off |
